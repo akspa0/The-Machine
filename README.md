@@ -1,5 +1,11 @@
 # The-Machine
 
+---
+
+Dedicated to Carlito Cross - RIP - [MadhouseLive](https://www.madhouselive.com/)
+
+---
+
 A privacy-focused, modular pipeline for processing phone call audio and other recordings. Automates ingestion, PII removal, file tracking, audio separation, CLAP annotation, loudness normalization, speaker diarization, transcription, soundbite extraction, LLM integration, remixing, and show creation. All steps are orchestrated for strict privacy, traceability, and manifest/logging requirements.
 
 ---
@@ -93,10 +99,59 @@ You can add custom scripts to the `extensions/` folder. These scripts will be ru
   ```
 - Outputs are written to `characters/<call_title or call_id>/<channel or conversation_speaker>/` with transcript, persona, and audio clips.
 
-### General Extension Best Practices
+### Avatar SDXL Generator Extension
+
+- The `avatar_sdxl_generator.py` extension (in `extensions/avatar/`) generates persona (avatar) and backdrop images for each call/persona using SDXL workflows.
+- **Output structure:**
+  - `comfyui_images/avatar/backdrops/` — Backdrop images for each call.
+  - `comfyui_images/avatar/{call_id}/{speaker}/` — Persona images for each speaker in each call.
+  - `comfyui_images/avatar/image_manifest.json` — Manifest mapping call_id to backdrop and (call_id, speaker) to persona image.
+- **Workflow customization:** Uses separate, tweakable SDXL workflow JSONs for avatars and backdrops (`avatar_sdxl_workflow.json`, `backdrop_sdxl_workflow.json`).
+- **CLI options:**
+  - `--initial-prompt` to control style (e.g., "a drawing of", "a photograph of").
+  - `--avatar-workflow` and `--backdrop-workflow` to specify custom workflows.
+- **Usage example:**
+  ```sh
+  python extensions/avatar/sdxl_avatar_generator.py \
+    --persona-manifest outputs/run-YYYYMMDD-HHMMSS/characters/persona_manifest.json \
+    --output-root outputs/run-YYYYMMDD-HHMMSS \
+    --initial-prompt "a drawing of"
+  ```
+- Outputs are ready for downstream animation, lipsync, and compositing steps.
+
+## General Extension Best Practices
 - Extensions should be robust to folder naming and support both batch and single-file workflows.
 - Log only anonymized, PII-free information.
 - See `extensions/README.md` for more details and extension authoring tips.
+
+### ComfyUI Image/Video Generator Extension
+
+The ComfyUI extension (`extensions/comfyui_image_generator.py`) enables LLM-driven image and video generation from audio transcripts. It is fully integrated with the pipeline and supports robust, privacy-focused, and context-rich prompt generation for downstream ComfyUI workflows.
+
+### Key Features
+- **Token-aware, context-preserving segmentation:**
+  - Transcripts are segmented into windows of 90 seconds (default, configurable via `--window-seconds`).
+  - Each segment is checked to ensure it does not exceed the token limit (default 4096, configurable up to 16384, hard cap 23000).
+  - If a segment would exceed the token limit, it is split at the last sentence/utterance boundary before the limit to preserve context.
+  - This prevents excessive splitting (e.g., 99 jobs for a 54-minute file) and ensures each prompt is context-rich and LLM-friendly.
+- **CLI options:**
+  - `--window-seconds <N>`: Time window size for scene segmentation (default: 90, recommended: 60-120)
+  - `--max-tokens <N>`: Maximum number of tokens per segment (default: 4096, max: 16384, hard cap: 23000)
+  - `--force`: Force regeneration of all prompts and scene prompt JSONs, even if they already exist.
+- **Consolidated batching:**
+  - The number of LLM jobs is now proportional to audio length and window size, not utterance count. For example, a 54-minute file with 90s windows yields about 36 jobs.
+- **Privacy and traceability:**
+  - All prompts and outputs are anonymized and PII-free, with full manifest tracking.
+
+### Usage Example
+```sh
+python extensions/comfyui_image_generator.py \
+  --run-folder outputs/run-YYYYMMDD-HHMMSS \
+  --workflow extensions/ComfyUI/theMachine_SDXL_Basic.json \
+  --image --window-seconds 90 --max-tokens 4096
+```
+
+See `extensions/comfyui_image_generator_README.md` for advanced options, troubleshooting, and integration details.
 
 ---
 
@@ -149,6 +204,7 @@ python pipeline_orchestrator.py --output-folder outputs/run-YYYYMMDD-HHMMSS --re
 - **Too many/false segments:** Raise the threshold or adjust pairing/gap settings.
 - **LLM token limit errors:** The pipeline will chunk transcripts by speaker/segment automatically.
 - **Manifest/logs:** Check the output run folder for detailed logs and manifest.json.
+- **If prompts or scene prompt JSONs do not update after changing window or token settings, use the `--force` option to force regeneration. Otherwise, the script will reuse existing files.**
 
 ---
 
