@@ -59,8 +59,11 @@ def main():
     parser = argparse.ArgumentParser(description='Generate SDXL persona and backdrop images for each call/persona.')
     parser.add_argument('--persona-manifest', type=str, required=True, help='Path to persona_manifest.json')
     parser.add_argument('--output-root', type=str, required=True, help='Path to run-* output folder')
-    parser.add_argument('--avatar-workflow', type=str, default='extensions/ComfyUI/avatar/avatar_sdxl_workflow.json', help='Path to avatar SDXL workflow JSON')
-    parser.add_argument('--backdrop-workflow', type=str, default='extensions/ComfyUI/avatar/backdrop_sdxl_workflow.json', help='Path to backdrop SDXL workflow JSON')
+    script_dir = Path(__file__).parent.resolve()
+    default_avatar_workflow = script_dir.parent.parent / 'ComfyUI' / 'avatar' / 'avatar_sdxl_workflow.json'
+    default_backdrop_workflow = script_dir.parent.parent / 'ComfyUI' / 'avatar' / 'backdrop_sdxl_workflow.json'
+    parser.add_argument('--avatar-workflow', type=str, default=str(default_avatar_workflow), help='Path to avatar SDXL workflow JSON')
+    parser.add_argument('--backdrop-workflow', type=str, default=str(default_backdrop_workflow), help='Path to backdrop SDXL workflow JSON')
     parser.add_argument('--initial-prompt', type=str, default='', help='Initial text to prepend to the positive prompt (e.g., "a drawing of", "a photograph of")')
     args = parser.parse_args()
 
