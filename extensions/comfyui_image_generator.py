@@ -11,6 +11,11 @@ Usage (CLI):
 
 If run from pipeline_orchestrator.py, the script will auto-detect the run folder and use LLM outputs or master transcripts as prompts.
 
+Behavior:
+    - Always generates a new SDXL image prompt using the LLM for every run, regardless of whether a previous prompt file exists.
+    - Loads the transcript, truncates to 300 tokens, and calls the LLM to generate a new prompt, saving the result and seed.
+    - If the LLM call fails, falls back to a default privacy-safe prompt and logs a warning.
+
 Options:
     --run-folder      Path to a run-YYYYMMDD-HHMMSS output folder (required)
     --prompt         Text prompt for image generation (overrides workflow prompt)
@@ -30,50 +35,126 @@ import os
 from pathlib import Path
 import requests
 from datetime import datetime
+import sys
+sys.path.append(str(Path(__file__).parent))
+from llm_utils import run_llm_task
+
+# Tokenization utility
+try:
+    import tiktoken
+    def truncate_to_tokens(text, max_tokens=512, model="gpt-3.5-turbo"):
+        enc = tiktoken.encoding_for_model(model)
+        tokens = enc.encode(text)
+        if len(tokens) > max_tokens:
+            print(f"[WARN] Transcript truncated from {len(tokens)} to {max_tokens} tokens for LLM prompt generation.")
+            tokens = tokens[:max_tokens]
+            return enc.decode(tokens)
+        return text
+except ImportError:
+    def truncate_to_tokens(text, max_tokens=512, model=None):
+        # Fallback: 1 token ≈ 4 chars
+        max_chars = max_tokens * 4
+        if len(text) > max_chars:
+            print(f"[WARN] Transcript truncated from {len(text)} to {max_chars} chars (approx {max_tokens} tokens) for LLM prompt generation.")
+            return text[:max_chars]
+        return text
+
+def find_llm_image_prompt(run_folder):
+    llm_dir = run_folder / 'llm'
+    if llm_dir.exists():
+        for call_id in sorted(llm_dir.iterdir()):
+            if call_id.is_dir():
+                prompt_file = call_id / 'sdxl_image_prompt.txt'
+                if prompt_file.exists():
+                    return prompt_file.read_text(encoding='utf-8').strip(), prompt_file
+        # Single-file mode: look for llm/sdxl_image_prompt.txt
+        prompt_file = llm_dir / 'sdxl_image_prompt.txt'
+        if prompt_file.exists():
+            return prompt_file.read_text(encoding='utf-8').strip(), prompt_file
+    return None, None
+
+def generate_image_prompt_with_llm(transcript, config, output_path=None):
+    # Find the sdxl_image_prompt task
+    sdxl_task = None
+    for task in config.get('llm_tasks', []):
+        if task.get('name') == 'sdxl_image_prompt':
+            sdxl_task = task
+            break
+    if not sdxl_task:
+        print("[ERROR] No sdxl_image_prompt task found in llm_tasks.json. Using fallback.")
+        return "A surreal, privacy-safe image.", None
+    prompt_template = sdxl_task.get('prompt_template')
+    prompt = prompt_template.replace('{transcript}', transcript)
+    # Use run_llm_task from llm_utils.py
+    print("[INFO] Generating SDXL image prompt using LLM...")
+    seed = None
+    result = run_llm_task(prompt, config, output_path=output_path, seed=seed)
+    return result, seed
+
+def postprocess_prompt(prompt, max_chars=512):
+    import re
+    # Remove leading 'Prompt:' or similar headers
+    prompt = re.sub(r'^\s*Prompt:\s*', '', prompt, flags=re.IGNORECASE)
+    # Collapse newlines to spaces
+    prompt = prompt.replace('\n', ' ')
+    # Strip leading/trailing whitespace
+    prompt = prompt.strip()
+    # Truncate to max_chars
+    if len(prompt) > max_chars:
+        print(f"[WARN] Final prompt truncated from {len(prompt)} to {max_chars} characters for ComfyUI.")
+        prompt = prompt[:max_chars]
+    return prompt
 
 def load_prompt(args, run_folder):
-    if args.prompt:
-        prompt = args.prompt
-    elif args.prompt_file:
-        with open(args.prompt_file, 'r', encoding='utf-8') as f:
-            prompt = f.read().strip()
-    else:
-        # Try to auto-detect a prompt source (LLM output or master transcript)
-        llm_dir = run_folder / 'llm'
-        prompt = None
-        if llm_dir.exists():
-            for call_id in sorted(llm_dir.iterdir()):
-                if call_id.is_dir():
-                    for file in call_id.iterdir():
-                        if file.name.endswith('.txt'):
-                            with open(file, 'r', encoding='utf-8') as f:
-                                text = f.read().strip()
-                                if text:
-                                    prompt = text
-                                    break
-                if prompt:
-                    break
-        if not prompt:
-            # Fallback: master transcript
-            soundbites_dir = run_folder / 'soundbites'
-            for call_id in sorted(soundbites_dir.iterdir()):
-                master_txt = call_id / f"{call_id.name}_master_transcript.txt"
-                if master_txt.exists():
-                    with open(master_txt, 'r', encoding='utf-8') as f:
-                        text = f.read().strip()
-                        if text:
-                            prompt = text
-                            break
-        if not prompt:
-            prompt = "A surreal, privacy-safe image."
-    # Truncate prompt to 300 characters
-    return prompt[:300]
+    # Always generate a new SDXL image prompt using the LLM
+    soundbites_dir = run_folder / 'soundbites'
+    transcript = None
+    for call_id in sorted(soundbites_dir.iterdir()):
+        master_txt = call_id / f"{call_id.name}_master_transcript.txt"
+        if master_txt.exists():
+            transcript = master_txt.read_text(encoding='utf-8').strip()
+            break
+    if not transcript:
+        print("[WARN] No transcript found. Using fallback prompt.")
+        return "A surreal, privacy-safe image."
+    # Generate image prompt using LLM
+    llm_config_path = Path('workflows/llm_tasks.json')
+    if not llm_config_path.exists():
+        print("[ERROR] workflows/llm_tasks.json not found. Using fallback prompt.")
+        return "A surreal, privacy-safe image."
+    with open(llm_config_path, 'r', encoding='utf-8') as f:
+        llm_config = json.load(f)
+    # Override the model for SDXL prompt generation in this extension only
+    llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'  # Extension-specific override
+    llm_dir = run_folder / 'llm'
+    llm_dir.mkdir(exist_ok=True)
+    output_path = llm_dir / 'sdxl_image_prompt.txt'
+    # Truncate transcript to 300 tokens before LLM call
+    transcript_trunc = truncate_to_tokens(transcript, max_tokens=300, model=llm_config.get('lm_studio_model_identifier', 'gpt-3.5-turbo'))
+    prompt, seed = generate_image_prompt_with_llm(transcript_trunc, llm_config, output_path=output_path)
+    # Save the seed if available
+    if seed is not None:
+        (llm_dir / 'sdxl_image_prompt_seed.txt').write_text(str(seed), encoding='utf-8')
+    if prompt is None or prompt.strip() == '' or prompt.startswith('LLM API error'):
+        print("[WARN] LLM failed to generate a valid prompt. Using fallback.")
+        prompt = "A surreal, privacy-safe image."
+    prompt = postprocess_prompt(prompt, max_chars=300)
+    print(f"[INFO] Final prompt to be sent to ComfyUI: {repr(prompt)}")
+    return prompt
 
 def update_workflow_prompt(workflow, prompt, batch_size=1, seed=None):
-    # Find the node with class_type 'CLIPTextEncode' and _meta.title == 'Positive prompt'
+    # For this workflow, the 'text' field must be a string, not a list
     for node in workflow.values():
         if node.get('class_type') == 'CLIPTextEncode' and node.get('_meta', {}).get('title') == 'Positive prompt':
-            node['inputs']['text'] = prompt
+            node['inputs']['text'] = prompt  # Must be a string
+        if node.get('class_type') == 'CLIPTextEncode' and node.get('_meta', {}).get('title') == 'Negative prompt':
+            neg = node['inputs'].get('text', '')
+            if isinstance(neg, list) and neg:
+                node['inputs']['text'] = neg[0]
+            elif isinstance(neg, str):
+                node['inputs']['text'] = neg
+            else:
+                node['inputs']['text'] = ''
     # Set batch size if present
     for node in workflow.values():
         if node.get('class_type') == 'EmptyLatentImage':
@@ -87,7 +168,10 @@ def update_workflow_prompt(workflow, prompt, batch_size=1, seed=None):
 def call_comfyui_api(api_url, workflow):
     url = f"{api_url}/prompt"
     headers = {'Content-Type': 'application/json'}
-    response = requests.post(url, headers=headers, data=json.dumps(workflow))
+    payload = {"prompt": workflow}  # Wrap workflow as required by ComfyUI API
+    print("[DEBUG] Final API payload:")
+    print(json.dumps(payload, indent=2))
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
     if response.status_code != 200:
         raise RuntimeError(f"ComfyUI API error: {response.status_code} {response.text}")
     return response.json()
@@ -95,8 +179,6 @@ def call_comfyui_api(api_url, workflow):
 def main():
     parser = argparse.ArgumentParser(description="ComfyUI Image Generator Extension for The-Machine")
     parser.add_argument('--run-folder', type=str, required=True, help='Path to run-YYYYMMDD-HHMMSS output folder')
-    parser.add_argument('--prompt', type=str, help='Text prompt for image generation')
-    parser.add_argument('--prompt-file', type=str, help='File containing prompt text')
     parser.add_argument('--workflow', type=str, default='extensions/ComfyUI/theMachine_SDXL_Basic.json', help='Path to ComfyUI workflow JSON')
     parser.add_argument('--output-dir', type=str, help='Output directory for images (default: <run-folder>/comfyui_images)')
     parser.add_argument('--seed', type=int, help='Random seed for generation')
@@ -113,58 +195,86 @@ def main():
 
     # Load workflow
     with open(args.workflow, 'r', encoding='utf-8') as f:
-        workflow = json.load(f)
+        workflow_template = json.load(f)
 
-    # Load prompt
-    prompt = load_prompt(args, run_folder)
-    print(f"[DEBUG] Prompt to be used (truncated to 300 chars): {repr(prompt)}")
+    llm_dir = run_folder / 'llm'
+    if not llm_dir.exists():
+        print(f"[ERROR] llm/ folder not found in {run_folder}")
+        return
 
-    # Update workflow with prompt, batch size, seed
-    workflow = update_workflow_prompt(workflow, prompt, batch_size=args.batch_size, seed=args.seed)
-
-    # DEBUG: Print the Positive prompt node after update
-    for node_id, node in workflow.items():
-        if node.get('class_type') == 'CLIPTextEncode' and node.get('_meta', {}).get('title') == 'Positive prompt':
-            print(f"[DEBUG] Positive prompt node after update: {json.dumps(node, indent=2)}")
-            if not node['inputs'].get('text'):
-                print("[ERROR] No prompt set in Positive prompt node! Aborting.")
-                exit(1)
-
-    # DEBUG: Print workflow to verify prompt is set
-    print("[DEBUG] Workflow to be sent to ComfyUI API:")
-    print(json.dumps(workflow, indent=2))
-
-    # Call ComfyUI API
-    print(f"[INFO] Sending workflow to ComfyUI API at {args.api_url} ...")
-    result = call_comfyui_api(args.api_url, workflow)
-    print(f"[INFO] ComfyUI API response: {result}")
-
-    # Save metadata
-    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    meta_path = output_dir / f'comfyui_metadata_{timestamp}.json'
-    with open(meta_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2)
-    print(f"[INFO] Metadata saved to {meta_path}")
-
-    # Optionally update manifest
-    if args.update_manifest:
-        manifest_path = run_folder / 'manifest.json'
-        if manifest_path.exists():
-            with open(manifest_path, 'r', encoding='utf-8') as f:
-                manifest = json.load(f)
-        else:
-            manifest = []
-        manifest.append({
-            'stage': 'comfyui_image_generation',
-            'timestamp': timestamp,
-            'prompt': prompt,
-            'workflow': str(args.workflow),
-            'output_dir': str(output_dir),
-            'result': result
-        })
-        with open(manifest_path, 'w', encoding='utf-8') as f:
-            json.dump(manifest, f, indent=2)
-        print(f"[INFO] Manifest updated at {manifest_path}")
+    # Find all call subfolders in llm/
+    call_folders = [d for d in llm_dir.iterdir() if d.is_dir()]
+    single_file_prompt = llm_dir / 'sdxl_image_prompt.txt'
+    if call_folders:
+        # Multi-call mode
+        for call_folder in call_folders:
+            call_id = call_folder.name
+            prompt_file = call_folder / 'sdxl_image_prompt.txt'
+            if not prompt_file.exists():
+                print(f"[WARN] No sdxl_image_prompt.txt found for call {call_id}, skipping.")
+                continue
+            prompt = prompt_file.read_text(encoding='utf-8').strip()
+            prompt = postprocess_prompt(prompt, max_chars=300)
+            print(f"[INFO] Processing call {call_id} with prompt: {repr(prompt)}")
+            # Prepare workflow for this call
+            workflow = json.loads(json.dumps(workflow_template))  # Deep copy
+            workflow = update_workflow_prompt(workflow, prompt, batch_size=args.batch_size, seed=args.seed)
+            call_output_dir = output_dir / call_id
+            call_output_dir.mkdir(parents=True, exist_ok=True)
+            # Call ComfyUI API
+            print(f"[INFO] Sending workflow for call {call_id} to ComfyUI API at {args.api_url} ...")
+            result = call_comfyui_api(args.api_url, workflow)
+            print(f"[INFO] ComfyUI API response for call {call_id}: {result}")
+            # TODO: Move/copy images from ComfyUI output dir to call_output_dir
+            # Optionally update manifest
+            if args.update_manifest:
+                manifest_path = run_folder / 'manifest.json'
+                if manifest_path.exists():
+                    with open(manifest_path, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+                else:
+                    manifest = []
+                manifest.append({
+                    'stage': 'comfyui_image_generation',
+                    'call_id': call_id,
+                    'prompt': prompt,
+                    'workflow': str(args.workflow),
+                    'output_dir': str(call_output_dir),
+                    'result': result
+                })
+                with open(manifest_path, 'w', encoding='utf-8') as f:
+                    json.dump(manifest, f, indent=2)
+                print(f"[INFO] Manifest updated at {manifest_path}")
+    elif single_file_prompt.exists():
+        # Single-file mode
+        prompt = single_file_prompt.read_text(encoding='utf-8').strip()
+        prompt = postprocess_prompt(prompt, max_chars=300)
+        print(f"[INFO] Processing single-file prompt: {repr(prompt)}")
+        workflow = update_workflow_prompt(workflow_template, prompt, batch_size=args.batch_size, seed=args.seed)
+        # Call ComfyUI API
+        print(f"[INFO] Sending workflow to ComfyUI API at {args.api_url} ...")
+        result = call_comfyui_api(args.api_url, workflow)
+        print(f"[INFO] ComfyUI API response: {result}")
+        # TODO: Move/copy images from ComfyUI output dir to output_dir
+        if args.update_manifest:
+            manifest_path = run_folder / 'manifest.json'
+            if manifest_path.exists():
+                with open(manifest_path, 'r', encoding='utf-8') as f:
+                    manifest = json.load(f)
+            else:
+                manifest = []
+            manifest.append({
+                'stage': 'comfyui_image_generation',
+                'prompt': prompt,
+                'workflow': str(args.workflow),
+                'output_dir': str(output_dir),
+                'result': result
+            })
+            with open(manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(manifest, f, indent=2)
+            print(f"[INFO] Manifest updated at {manifest_path}")
+    else:
+        print("[ERROR] No sdxl_image_prompt.txt found in llm/ or any subfolder. Nothing to process.")
 
 if __name__ == '__main__':
     main() 
