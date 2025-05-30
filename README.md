@@ -39,6 +39,53 @@ pip install -r requirements.txt
 
 ---
 
+## 🧠 Local LLM Inference with LM Studio
+
+The-Machine supports local LLM inference using [LM Studio](https://lmstudio.ai/), allowing you to run powerful language models on your own hardware for privacy and speed.
+
+### 1. Install LM Studio
+- Download LM Studio from [https://lmstudio.ai/](https://lmstudio.ai/).
+- Available for Windows, Mac, and Linux.
+- Follow the installation instructions for your platform.
+
+### 2. Download a Recommended Model
+- We recommend using a high-quality, chat-optimized model in GGUF format. For example:
+  - **Nous Hermes 2 Pro (Q4_K_M GGUF):** [Model Card & Download](https://huggingface.co/TheBloke/Nous-Hermes-2-Pro-Llama-3-8B-GGUF)
+- Download the desired quantization (e.g., Q4_K_M for a good balance of speed and quality).
+
+### 3. Load the Model in LM Studio
+- Open LM Studio and use the 'Download Model' feature, or manually place the GGUF file in your models directory.
+- In LM Studio, select the model and click 'Launch'.
+- Ensure the local API server is enabled (default: `http://localhost:1234/v1`).
+  - You can check this in the LM Studio settings under 'API Server'.
+
+### 4. Configure The-Machine to Use LM Studio
+- In your LLM config (e.g., `workflows/llm_tasks.json`), set the API endpoint to `http://localhost:1234/v1`.
+- Or, use the CLI flag to specify the config:
+  ```sh
+  python pipeline_orchestrator.py <input_dir> --llm_config workflows/llm_tasks.json
+  ```
+- Make sure your LLM config matches the model's expected prompt format (e.g., chat template, system prompt).
+
+### 5. Example LLM Config Snippet
+```json
+{
+  "api_base": "http://localhost:1234/v1",
+  "model": "Nous-Hermes-2-Pro-Llama-3-8B",
+  "temperature": 0.7,
+  "max_tokens": 2048,
+  "system_prompt": "You are a helpful assistant."
+}
+```
+
+### 6. Troubleshooting
+- **LM Studio not running:** Make sure LM Studio is open and the API server is enabled.
+- **Port conflicts:** Ensure nothing else is using port 1234, or change the port in LM Studio and your config.
+- **Model loading errors:** Verify you downloaded the correct GGUF file and quantization for your hardware.
+- **API errors:** Test the endpoint in your browser: [http://localhost:1234/v1](http://localhost:1234/v1) should return a JSON response if running.
+
+---
+
 ## Major Features & Recent Changes
 - **Soundbites folders** are now named after sanitized call titles, not just call IDs.
 - **SFW (safe-for-work) call titles** and show summaries are generated and included in outputs.
@@ -102,60 +149,4 @@ You can add custom scripts to the `extensions/` folder. These scripts will be ru
 
 ## Configuration
 - **CLAP segmentation/annotation:** Now handled exclusively by the extension (`clap_segmentation_experiment.py`). You may still configure prompts and thresholds in `workflows/clap_segmentation.json` and `workflows/clap_annotation.json` for use by the extension.
-- **LLM tasks:** `workflows/llm_tasks.json` (task list, prompts, model config)
-- **All configs are editable JSON files.**
-
----
-
-## Usage
-
-### Basic CLI Example
-```sh
-python pipeline_orchestrator.py <input_dir>
-```
-
-### With CLAP-based Call Segmentation (Extension Only)
-```sh
-python extensions/clap_segmentation_experiment.py outputs/run-YYYYMMDD-HHMMSS --config workflows/clap_segmentation.json
-```
-
-### Processing a YouTube/URL Input
-```sh
-python pipeline_orchestrator.py --url "https://www.youtube.com/watch?v=..."
-```
-
-### Resume/Debug
-```sh
-python pipeline_orchestrator.py --output-folder outputs/run-YYYYMMDD-HHMMSS --resume
-```
-
-### Other CLI Options
-- `--asr_engine parakeet|whisper` (choose ASR model)
-- `--llm_config workflows/llm_tasks.json` (custom LLM task config)
-- `--call-tones` (insert tones between calls in show output)
-- `--resume-from <stage>` (resume from a specific stage)
-
----
-
-## Customization
-- **CLAP/LLM prompts, thresholds, and logic** are fully tweakable in the `workflows/` JSON files.
-- Change prompts, add/remove tasks, adjust thresholds, and rerun the pipeline—no code changes needed.
-
----
-
-## Troubleshooting
-- **PyTorch install issues:** Use conda and follow the [official instructions](https://pytorch.org/get-started/locally/).
-- **No segments detected:** Lower the CLAP confidence threshold or add more prompts in `clap_segmentation.json`.
-- **Too many/false segments:** Raise the threshold or adjust pairing/gap settings.
-- **LLM token limit errors:** The pipeline will chunk transcripts by speaker/segment automatically.
-- **Manifest/logs:** Check the output run folder for detailed logs and manifest.json.
-
----
-
-## Contributing & Support
-- PRs and issues welcome!
-- For questions, open an issue or contact the maintainer.
-
----
-
-**Happy hacking with The-Machine!** 
+- **LLM tasks:** `
