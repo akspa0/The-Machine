@@ -1,0 +1,4 @@
+{
+  // This workflow is for generating single-person avatar/character images with a green screen background. Node 10 is set to 1024x1024 for lipsync compatibility.
+// ... rest of the workflow copied and node 10 modified ...
+} 

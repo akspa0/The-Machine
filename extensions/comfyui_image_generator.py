@@ -280,17 +280,18 @@ def segment_transcript_token_aware(transcript, window_seconds=90, max_tokens=409
     """
     Segment transcript into windows of up to window_seconds, ensuring each segment does not exceed max_tokens.
     If a segment would exceed the token limit, backtrack to the last sentence/utterance boundary before the limit.
+    Returns a list of segments, each with start, end, text, and lines (list of dicts with start, end, speaker, text).
     """
     enc = tiktoken.encoding_for_model(model)
-    # Parse transcript lines with timestamps
-    time_line_re = re.compile(r'\[.*?\]\[.*?\]\[(\d+\.\d+)-(\d+\.\d+)\]: (.*)')
+    # Parse transcript lines with timestamps and speaker info
+    time_line_re = re.compile(r'\[(.*?)\]\[(.*?)\]\[(\d+\.\d+)-(\d+\.\d+)\]: (.*)')
     lines = []
     for line in transcript.splitlines():
         m = time_line_re.match(line)
         if not m:
             continue
-        start, end, text = float(m.group(1)), float(m.group(2)), m.group(3)
-        lines.append({'start': start, 'end': end, 'text': text})
+        channel, speaker, start, end, text = m.group(1), m.group(2), float(m.group(3)), float(m.group(4)), m.group(5)
+        lines.append({'start': start, 'end': end, 'speaker': speaker, 'channel': channel, 'text': text, 'raw': line})
     if not lines:
         return []
     segments = []
@@ -300,27 +301,22 @@ def segment_transcript_token_aware(transcript, window_seconds=90, max_tokens=409
     current_end = lines[0]['end']
     for i, line in enumerate(lines):
         line_tokens = len(enc.encode(line['text']))
-        # If adding this line would exceed max_tokens or window_seconds, start a new segment
         if (current and (current_tokens + line_tokens > max_tokens or line['end'] - current_start > window_seconds)):
-            # Try to backtrack to last sentence boundary if possible
-            segment_text = ' '.join([l['text'] for l in current])
-            segments.append({'start': current_start, 'end': current_end, 'text': segment_text})
+            segment_text = '\n'.join([l['raw'] for l in current])
+            segments.append({'start': current_start, 'end': current_end, 'text': segment_text, 'lines': current.copy()})
             current = []
             current_tokens = 0
             current_start = line['start']
         current.append(line)
         current_tokens += line_tokens
         current_end = line['end']
-    # Add last segment
     if current:
-        segment_text = ' '.join([l['text'] for l in current])
-        segments.append({'start': current_start, 'end': current_end, 'text': segment_text})
-    # Warn if any segment was truncated due to token limit
+        segment_text = '\n'.join([l['raw'] for l in current])
+        segments.append({'start': current_start, 'end': current_end, 'text': segment_text, 'lines': current.copy()})
     for seg in segments:
         seg_tokens = len(enc.encode(seg['text']))
         if seg_tokens > max_tokens:
             print(f"[WARN] Segment from {seg['start']}s to {seg['end']}s truncated to fit token limit ({max_tokens}).")
-            # Truncate at last sentence boundary before token limit
             sentences = re.split(r'(?<=[.!?]) +', seg['text'])
             acc = ''
             acc_tokens = 0
@@ -338,10 +334,12 @@ def generate_prompts_for_segments_token_aware(transcript, llm_config, window_sec
     prompts = []
     prompt_texts = []
     for seg in segments:
+        # Log number of lines and preview
+        print(f"[INFO] Scene {seg['start']:.2f}-{seg['end']:.2f}s: {len(seg['lines'])} lines. Preview: {seg['lines'][0]['raw'] if seg['lines'] else '[empty]'}")
         if prompt_type == 'scene':
             prompt = (
-                f"Summarize the following conversation segment (from {seg['start']:.2f}s to {seg['end']:.2f}s) into a concise, visually descriptive phrase for an SDXL image or video prompt. "
-                f"Avoid repetition and keep it under {max_chars} characters.\n\n{seg['text']}\n\nPrompt:"
+                f"Given the following scene transcript (multiple lines, speakers, and timestamps), generate a concise, visually descriptive, dynamic phrase for an SDXL image or video prompt. "
+                f"Capture the key action, mood, and context. Avoid repetition and keep it under {max_chars} characters.\n\n{seg['text']}\n\nPrompt:"
             )
         else:
             prompt = seg['text']
@@ -351,7 +349,7 @@ def generate_prompts_for_segments_token_aware(transcript, llm_config, window_sec
         prompt_text = responses[i] if i < len(responses) else ""
         if len(prompt_text) > max_chars:
             prompt_text = prompt_text[:max_chars]
-        prompts.append({'start': seg['start'], 'end': seg['end'], 'prompt': prompt_text})
+        prompts.append({'start': seg['start'], 'end': seg['end'], 'prompt': prompt_text, 'lines': seg['lines']})
     return prompts
 
 def save_scene_prompts_json(prompts, output_path):

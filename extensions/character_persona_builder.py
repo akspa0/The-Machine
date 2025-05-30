@@ -192,6 +192,7 @@ class CharacterPersonaBuilder(ExtensionBase):
             self.log("No speakers directory found.")
             return
         callid_to_title = {}
+        persona_manifest = []
         for call_folder in speakers_root.iterdir():
             if not call_folder.is_dir():
                 continue
@@ -204,7 +205,7 @@ class CharacterPersonaBuilder(ExtensionBase):
             if not channel_map:
                 self.log(f"No valid channels for {call_id}")
                 continue
-            call_characters_dir = characters_root / call_title
+            call_characters_dir = characters_root / call_id
             call_characters_dir.mkdir(parents=True, exist_ok=True)
             # If only conversation, process per speaker
             if set(channel_map.values()) == {"conversation"}:
@@ -213,14 +214,14 @@ class CharacterPersonaBuilder(ExtensionBase):
                     speakers = collect_utterances_per_speaker(conversation_dir)
                     for speaker_id, utts in speakers.items():
                         if not utts:
-                            self.log(f"No utterances for conversation_{speaker_id} in {call_id}")
+                            self.log(f"No utterances for {speaker_id} in {call_id}")
                             continue
                         transcript_lines = []
                         for u in utts:
                             ts = f"{u['timestamp']:.2f}" if u['timestamp'] is not None else "?"
                             transcript_lines.append(f"[{ts}] {u['text']}")
                         transcript = '\n'.join(transcript_lines)
-                        out_dir = call_characters_dir / f"conversation_{speaker_id}"
+                        out_dir = call_characters_dir / speaker_id
                         out_dir.mkdir(parents=True, exist_ok=True)
                         transcript_path = out_dir / 'speaker_transcript.txt'
                         transcript_path.write_text(transcript, encoding='utf-8')
@@ -229,8 +230,16 @@ class CharacterPersonaBuilder(ExtensionBase):
                         )
                         persona_path = out_dir / 'persona.md'
                         persona = run_llm_task(user_prompt, self.llm_config, output_path=persona_path, seed=None)
-                        audio_clips = create_audio_clips(utts, out_dir, f"conversation_{speaker_id}")
-                        self.log(f"Wrote persona, transcript, and {len(audio_clips)} audio clips for conversation_{speaker_id} in {call_title} to {out_dir}")
+                        audio_clips = create_audio_clips(utts, out_dir, speaker_id)
+                        # Collect all .wav files for this speaker
+                        source_audio_paths = [str(u['wav_file']) for u in utts if u['wav_file'] is not None]
+                        persona_manifest.append({
+                            'call_id': call_id,
+                            'speaker': speaker_id,
+                            'persona_path': str(persona_path),
+                            'source_audio_paths': source_audio_paths
+                        })
+                        self.log(f"Wrote persona, transcript, and {len(audio_clips)} audio clips for {speaker_id} in {call_id} to {out_dir}")
             else:
                 # Merge all speakers per channel
                 utterances_by_channel = collect_utterances_merged(call_folder, channel_map)
@@ -253,7 +262,20 @@ class CharacterPersonaBuilder(ExtensionBase):
                     persona_path = out_dir / 'persona.md'
                     persona = run_llm_task(user_prompt, self.llm_config, output_path=persona_path, seed=None)
                     audio_clips = create_audio_clips(utts, out_dir, norm)
-                    self.log(f"Wrote persona, transcript, and {len(audio_clips)} audio clips for {norm} in {call_title} to {out_dir}")
+                    # Collect all .wav files for this channel
+                    source_audio_paths = [str(u['wav_file']) for u in utts if u['wav_file'] is not None]
+                    persona_manifest.append({
+                        'call_id': call_id,
+                        'speaker': norm,
+                        'persona_path': str(persona_path),
+                        'source_audio_paths': source_audio_paths
+                    })
+                    self.log(f"Wrote persona, transcript, and {len(audio_clips)} audio clips for {norm} in {call_id} to {out_dir}")
+        # Write persona manifest
+        manifest_path = characters_root / 'persona_manifest.json'
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(persona_manifest, f, indent=2)
+        self.log(f"Persona manifest written to {manifest_path}")
         self.log(f"Call ID to Title mapping: {json.dumps(callid_to_title, indent=2)}")
 
 if __name__ == "__main__":

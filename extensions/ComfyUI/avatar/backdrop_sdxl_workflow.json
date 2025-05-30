@@ -1,0 +1,4 @@
+{
+  // This workflow is for generating environmental/backdrop images for compositing avatars. Node 10 is set to 1368x768 for wide scenes.
+// ... rest of the workflow copied, node 10 unchanged ...
+} 
