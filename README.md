@@ -50,7 +50,7 @@ The-Machine supports local LLM inference using [LM Studio](https://lmstudio.ai/)
 
 ### 2. Download a Recommended Model
 - We recommend using a high-quality, chat-optimized model in GGUF format. For example:
-  - **Nous Hermes 2 Pro (Q4_K_M GGUF):** [Model Card & Download](https://huggingface.co/TheBloke/Nous-Hermes-2-Pro-Llama-3-8B-GGUF)
+  - **llama-3.1-8b-supernova-etherealhermes (Q4_K_M GGUF):** [Model Card & Download](https://huggingface.co/etherealhermes/llama-3.1-8b-supernova-etherealhermes-GGUF)
 - Download the desired quantization (e.g., Q4_K_M for a good balance of speed and quality).
 
 ### 3. Load the Model in LM Studio
@@ -71,7 +71,7 @@ The-Machine supports local LLM inference using [LM Studio](https://lmstudio.ai/)
 ```json
 {
   "api_base": "http://localhost:1234/v1",
-  "model": "Nous-Hermes-2-Pro-Llama-3-8B",
+  "model": "llama-3.1-8b-supernova-etherealhermes",
   "temperature": 0.7,
   "max_tokens": 2048,
   "system_prompt": "You are a helpful assistant."
