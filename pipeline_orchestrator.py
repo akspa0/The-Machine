@@ -26,6 +26,7 @@ import hashlib
 import yaml
 import tempfile
 import shutil
+import subprocess
 
 rich_traceback_install()
 console = Console()
@@ -36,6 +37,9 @@ TUPLE_SUBID = {
     'right': 'b',     # trans_out
     'out': 'c',       # out
 }
+
+# Supported video extensions for audio extraction
+VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.webm'}
 
 class Job:
     def __init__(self, job_id: str, data: Dict[str, Any], job_type: str = 'rename'):
@@ -758,7 +762,7 @@ class PipelineOrchestrator:
         api_key = llm_config.get('lm_studio_api_key', 'lm-studio')
         model_id = llm_config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
         temperature = llm_config.get('lm_studio_temperature', 0.5)
-        max_tokens = llm_config.get('lm_studio_max_tokens', 512)
+        max_tokens = llm_config.get('lm_studio_max_tokens', 1024)
         headers = {
             'Authorization': f'Bearer {api_key}',
             'Content-Type': 'application/json'
@@ -1741,26 +1745,53 @@ def create_jobs_from_input(input_path: Path) -> List[Job]:
     
     # Handle both single files and directories
     if input_path.is_file():
-        # Single file input
         file = input_path.name
         ext = input_path.suffix.lower()
         if ext in SUPPORTED_EXTENSIONS:
             orig_path = input_path
             base_name = file
             all_files.append((orig_path, base_name))
+        elif ext in VIDEO_EXTENSIONS:
+            # Extract audio from video file using ffmpeg
+            temp_audio_dir = Path('outputs') / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}/temp_audio"
+            temp_audio_dir.mkdir(parents=True, exist_ok=True)
+            audio_name = Path(file).stem + '.wav'
+            audio_path = temp_audio_dir / audio_name
+            print(f"[INFO] Extracting audio from video file: {file}")
+            try:
+                subprocess.run([
+                    'ffmpeg', '-y', '-i', str(input_path),
+                    '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', str(audio_path)
+                ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                print(f"[INFO] Audio extracted to: {audio_path}")
+                all_files.append((audio_path, audio_name))
+            except Exception as e:
+                print(f"[ERROR] Failed to extract audio from {file}: {e}")
     elif input_path.is_dir():
-        # Directory input - original logic
         for root, _, files in os.walk(input_path):
             for file in files:
                 ext = Path(file).suffix.lower()
-                if ext not in SUPPORTED_EXTENSIONS:
-                    continue
                 orig_path = Path(root) / file
                 base_name = Path(file).name
-                if base_name in seen_names:
-                    base_name = f"{Path(file).stem}_{uuid.uuid4().hex[:6]}{Path(file).suffix}"
-                seen_names.add(base_name)
-                all_files.append((orig_path, base_name))
+                if ext in SUPPORTED_EXTENSIONS:
+                    all_files.append((orig_path, base_name))
+                elif ext in VIDEO_EXTENSIONS:
+                    # Extract audio from video file using ffmpeg
+                    run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+                    temp_audio_dir = Path('outputs') / f"run-{run_ts}/temp_audio"
+                    temp_audio_dir.mkdir(parents=True, exist_ok=True)
+                    audio_name = Path(file).stem + '.wav'
+                    audio_path = temp_audio_dir / audio_name
+                    print(f"[INFO] Extracting audio from video file: {file}")
+                    try:
+                        subprocess.run([
+                            'ffmpeg', '-y', '-i', str(orig_path),
+                            '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '2', str(audio_path)
+                        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        print(f"[INFO] Audio extracted to: {audio_path}")
+                        all_files.append((audio_path, audio_name))
+                    except Exception as e:
+                        print(f"[ERROR] Failed to extract audio from {file}: {e}")
     else:
         # Input path doesn't exist or is neither file nor directory
         # No PII in error message

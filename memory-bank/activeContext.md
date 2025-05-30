@@ -24,7 +24,11 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - **NEW: CLI flag `--run-clap [first|last]` allows users to run CLAP segmentation/detection as a pre- or post-processing step.**
 - **NEW: All outputs, logs, and manifests are strictly PII-free and fully auditable.**
 - **NEW: Resume and force: The pipeline is robust to resume, with --resume and --resume-from, and --force now archives outputs instead of deleting them.**
-- **Next: Document extension API, update all workflow JSONs, and test new modular pipeline logic.**
+- **NEW: ComfyUI extension for LLM-driven image and video generation is now integrated and robust.**
+- **NEW: Scene-based prompt generation, hierarchical LLM summarization, and batching are implemented for both image and video workflows.**
+- **NEW: Two-phase execution: prompts and ComfyUI job configs are generated first, then LLM is unloaded before jobs are sent.**
+- **NEW: CLI and workflow selection logic for the extension is robust, supporting both image and video jobs, batching, and default/fallback logic.**
+- **Next: Update all workflow JSONs to reflect new modular pipeline logic and per-workflow LLM config. Document and test the extension API and CLI for ComfyUI and CLAP.**
 
 ## Recent Changes
 
@@ -46,11 +50,14 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - **Console output for available folders now only shows anonymized run folder names.**
 - **Removed all CLAP logic from the main pipeline; CLAP is now only run as an extension or via CLI flag.**
 - **Formalized extensions system for pre/post-processing.**
+- **Integrated ComfyUI extension for LLM-driven image/video generation, with scene-based prompt generation, hierarchical summarization, and robust workflow selection.**
+- **Implemented two-phase execution in the extension: prompt generation and ComfyUI job config, then LLM unload, then job execution.**
+- **Added CLI improvements and workflow selection logic for the extension, including batching and fallback logic.**
 
 ## Next Steps
 
 - **Immediate: Update all workflow JSONs to reflect new modular pipeline logic and per-workflow LLM config.**
-- **Secondary: Document and test the extension API and CLI flag for CLAP.**
+- **Secondary: Document and test the extension API and CLI flag for CLAP and ComfyUI.**
 - Enhanced error handling and edge cases for resume functionality
 - Advanced resume controls (--resume-from, --force-rerun, --clear-from)
 - Real-world integration testing with actual audio files
@@ -74,8 +81,9 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - **CLAP is only run as an extension or via CLI flag, not as a default pipeline stage.**
 - **Extensions are external scripts for pre/post-processing, not core pipeline stages.**
 - **LLM config is per-workflow, with defaults in llm_tasks.json.**
+- **ComfyUI extension is now the standard for LLM-driven image/video generation, with robust privacy, batching, and workflow selection logic.**
 
-## Current Focus: Modular, workflow-driven pipeline; CLAP and extensions as optional, user-invoked steps; LLM as a modular bus.
+## Current Focus: Modular, workflow-driven pipeline; CLAP and extensions as optional, user-invoked steps; LLM as a modular bus; ComfyUI extension for image/video as a robust, privacy-focused workflow.
 
 ## 2024-06-XX: Pipeline Stability Milestone
 - All major features (resume, finalized/calls export, single-file and tuple handling, privacy enforcement, tones, etc.) are now robust and working as intended.

@@ -108,4 +108,8 @@ _This file is a living document. Update it as you discover new patterns or prefe
 - The tool is now named **The-Machine**.
 - New GitHub repo: https://github.com/akspa0/The-Machine
 - All documentation and onboarding now emphasize conda as the recommended environment manager for PyTorch and GPU support.
-- All references to the old name have been replaced in docs and onboarding. 
+- All references to the old name have been replaced in docs and onboarding.
+
+- All extension scripts (e.g., ComfyUI, CLAP) must follow the same privacy, manifest, and workflow-driven patterns as the core pipeline.
+- ComfyUI extension must only update positive prompt nodes in workflows, never negative prompt nodes.
+- All LLM prompt generation and manifest writing (including extensions) must be strictly PII-free and follow the same anonymization rules as the core pipeline. 
