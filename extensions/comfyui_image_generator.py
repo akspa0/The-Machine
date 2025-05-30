@@ -29,6 +29,11 @@ Options:
     --master-transcript Path to a master transcript file to use for LLM prompt generation (overrides automatic search)
     --segmentation-mode Scene segmentation mode: time (default) or utterance
     --window-seconds Time window size in seconds for scene segmentation (default: 30)
+    --llm-model      Override the LLM model used for prompt generation (default: auto per mode)
+    --pause-after-prompts Pause after prompt generation to allow manual LLM unload before ComfyUI jobs
+    --video          Use video workflow and output video segments
+    --image          Use image workflow and output images
+    --image-workflow Path to ComfyUI image workflow JSON (default: theMachine_SDXL_Basic.json)
 
 All outputs and logs are anonymized and PII-free.
 """
@@ -44,6 +49,7 @@ from llm_utils import run_llm_task
 from glob import glob
 import difflib
 import re
+import subprocess
 
 # Tokenization utility
 try:
@@ -136,25 +142,24 @@ def safe_load_prompt_file(prompt_file, fallback_prompt="A surreal, privacy-safe 
         return fallback_prompt
     return prompt
 
-def find_transcript_for_call(run_folder, call_id_or_name):
-    # Look for finalized/soundbites/*/<call_id_or_name>_master_transcript.txt
+def find_transcript_for_call_any(run_folder, call_id_or_name):
+    """Find transcript for a call by searching finalized/soundbites/*/<call_id>_master_transcript.txt or <call_name>_master_transcript.txt."""
     finalized_soundbites = run_folder / 'finalized' / 'soundbites'
-    print(f"[DEBUG] Looking for transcript for call '{call_id_or_name}' in: {finalized_soundbites}")
     if finalized_soundbites.exists():
-        # Search all subfolders for <call_id_or_name>_master_transcript.txt
+        # Try by call_id
         for subdir in finalized_soundbites.iterdir():
             if subdir.is_dir():
                 candidate = subdir / f"{call_id_or_name}_master_transcript.txt"
-                print(f"[DEBUG] Checking: {candidate}")
                 if candidate.exists():
-                    print(f"[DEBUG] Found transcript: {candidate}")
+                    print(f"[DEBUG] Found transcript for call '{call_id_or_name}': {candidate}")
                     return candidate.read_text(encoding='utf-8').strip()
-    # Fallback: search all subfolders for a single *_master_transcript.txt
-    all_transcripts = list(finalized_soundbites.glob('*/'*1 + '*_master_transcript.txt'))
-    print(f"[DEBUG] Fallback transcript search found: {all_transcripts}")
-    if len(all_transcripts) == 1:
-        print(f"[DEBUG] Using fallback transcript: {all_transcripts[0]}")
-        return all_transcripts[0].read_text(encoding='utf-8').strip()
+        # Try by folder name
+        call_dir = finalized_soundbites / call_id_or_name
+        if call_dir.exists() and call_dir.is_dir():
+            for f in call_dir.iterdir():
+                if f.name.endswith('_master_transcript.txt'):
+                    print(f"[DEBUG] Found transcript for call '{call_id_or_name}' by folder: {f}")
+                    return f.read_text(encoding='utf-8').strip()
     print(f"[WARN] No transcript found for call '{call_id_or_name}'.")
     return None
 
@@ -250,9 +255,25 @@ def segment_transcript(transcript, mode='time', window_seconds=30):
                 segments.append({'start': start, 'end': end, 'text': chunk_text})
         return segments
 
+def batch_run_llm(prompts, llm_config):
+    """Batch LLM call: prompts is a list of prompt strings. Returns list of responses."""
+    # If your LLM API supports batching, implement here. Otherwise, process sequentially.
+    print(f"[INFO] Batch LLM prompt generation: {len(prompts)} prompts, model: {llm_config.get('lm_studio_model_identifier', 'default')}")
+    responses = []
+    for i, prompt in enumerate(prompts):
+        print(f"[INFO] LLM batch item {i+1}/{len(prompts)}")
+        result = run_llm_task(prompt, llm_config, output_path=None, chunking=False, single_output=True)
+        if result is None or result.strip() == '' or is_llm_error_prompt(result):
+            print(f"[WARN] LLM failed on batch item {i+1}. Skipping.")
+            responses.append("")
+        else:
+            responses.append(result.strip())
+    return responses
+
 def generate_prompts_for_segments(segments, llm_config, prompt_type='scene', max_chars=100):
     prompts = []
-    for i, seg in enumerate(segments):
+    prompt_texts = []
+    for seg in segments:
         if prompt_type == 'scene':
             prompt = (
                 f"Summarize the following conversation segment (from {seg['start']:.2f}s to {seg['end']:.2f}s) into a concise, visually descriptive phrase for an SDXL image or video prompt. "
@@ -260,12 +281,11 @@ def generate_prompts_for_segments(segments, llm_config, prompt_type='scene', max
             )
         else:
             prompt = seg['text']
-        print(f"[INFO] Running LLM for segment {i+1}/{len(segments)}: {seg['start']:.2f}-{seg['end']:.2f}s, length: {len(seg['text'])}")
-        result = run_llm_task(prompt, llm_config, output_path=None, chunking=False, single_output=True)
-        if result is None or result.strip() == '' or is_llm_error_prompt(result):
-            print(f"[WARN] LLM failed on segment {i+1}. Skipping.")
-            continue
-        prompt_text = result.strip()
+        prompt_texts.append(prompt)
+    # Batch LLM call
+    responses = batch_run_llm(prompt_texts, llm_config)
+    for i, seg in enumerate(segments):
+        prompt_text = responses[i] if i < len(responses) else ""
         if len(prompt_text) > max_chars:
             prompt_text = prompt_text[:max_chars]
         prompts.append({'start': seg['start'], 'end': seg['end'], 'prompt': prompt_text})
@@ -327,7 +347,7 @@ def get_or_generate_prompt(call_folder, run_folder, fallback_prompt="A surreal, 
         if not transcript:
             print(f"[INFO] No sdxl_image_prompt.txt found for {call_id_or_name}, generating prompt using LLM...")
     if not transcript:
-        transcript = find_transcript_for_call(run_folder, call_id_or_name)
+        transcript = find_transcript_for_call_any(run_folder, call_id_or_name)
     if not transcript:
         print(f"[WARN] No transcript found for {call_id_or_name}. Using fallback prompt.")
         prompt = fallback_prompt
@@ -339,7 +359,13 @@ def get_or_generate_prompt(call_folder, run_folder, fallback_prompt="A surreal, 
         else:
             with open(llm_config_path, 'r', encoding='utf-8') as f:
                 llm_config = json.load(f)
-            llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'
+            # Model override logic
+            if args and args.llm_model:
+                llm_config['lm_studio_model_identifier'] = args.llm_model
+            elif args and args.video:
+                llm_config['lm_studio_model_identifier'] = 'wan-video-llm-model'  # Example default for video
+            else:
+                llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'  # Default for image
             segmentation_mode = getattr(args, 'segmentation_mode', 'time') if args else 'time'
             window_seconds = getattr(args, 'window_seconds', 30) if args else 30
             prompt_result = run_llm_scene_based(transcript, llm_config, output_path=prompt_file, segmentation_mode=segmentation_mode, window_seconds=window_seconds)
@@ -385,7 +411,13 @@ def get_or_generate_singlefile_prompt(llm_dir, run_folder, fallback_prompt="A su
         else:
             with open(llm_config_path, 'r', encoding='utf-8') as f:
                 llm_config = json.load(f)
-            llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'
+            # Model override logic
+            if args and args.llm_model:
+                llm_config['lm_studio_model_identifier'] = args.llm_model
+            elif args and args.video:
+                llm_config['lm_studio_model_identifier'] = 'wan-video-llm-model'  # Example default for video
+            else:
+                llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'  # Default for image
             segmentation_mode = getattr(args, 'segmentation_mode', 'time') if args else 'time'
             window_seconds = getattr(args, 'window_seconds', 30) if args else 30
             prompt_result = run_llm_scene_based(transcript, llm_config, output_path=prompt_file, segmentation_mode=segmentation_mode, window_seconds=window_seconds)
@@ -399,26 +431,28 @@ def get_or_generate_singlefile_prompt(llm_dir, run_folder, fallback_prompt="A su
     return prompt
 
 def update_workflow_prompt(workflow, prompt, batch_size=1, seed=None):
-    # For this workflow, the 'text' field must be a string, not a list
-    for node in workflow.values():
-        if node.get('class_type') == 'CLIPTextEncode' and node.get('_meta', {}).get('title') == 'Positive prompt':
-            node['inputs']['text'] = prompt  # Must be a string
-        if node.get('class_type') == 'CLIPTextEncode' and node.get('_meta', {}).get('title') == 'Negative prompt':
-            neg = node['inputs'].get('text', '')
-            if isinstance(neg, list) and neg:
-                node['inputs']['text'] = neg[0]
-            elif isinstance(neg, str):
-                node['inputs']['text'] = neg
-            else:
-                node['inputs']['text'] = ''
+    # For both image and video workflows, the 'text' field in the positive prompt node must be a string
+    updated = False
+    for node_id, node in workflow.items():
+        if node.get('class_type') == 'CLIPTextEncode':
+            meta = node.get('_meta', {})
+            title = meta.get('title', '').lower()
+            # Only update positive prompt nodes
+            if 'positive' in title or ('prompt' in title and 'negative' not in title) or ('text encode' in title and 'negative' not in title):
+                old = node['inputs'].get('text', '')
+                node['inputs']['text'] = prompt  # Must be a string
+                print(f"[DEBUG] Replaced positive prompt in node {node_id} (title: {title})\n  Old: {old}\n  New: {prompt}")
+                updated = True
     # Set batch size if present
     for node in workflow.values():
-        if node.get('class_type') == 'EmptyLatentImage':
+        if node.get('class_type') == 'EmptyLatentImage' or node.get('class_type') == 'EmptyHunyuanLatentVideo':
             node['inputs']['batch_size'] = batch_size
     # Set seed if present
     for node in workflow.values():
         if node.get('class_type') == 'KSamplerAdvanced' and seed is not None:
             node['inputs']['noise_seed'] = int(seed)
+    if not updated:
+        print("[WARN] No positive prompt field was updated in the workflow. Please check workflow structure.")
     return workflow
 
 def call_comfyui_api(api_url, workflow):
@@ -432,6 +466,43 @@ def call_comfyui_api(api_url, workflow):
         raise RuntimeError(f"ComfyUI API error: {response.status_code} {response.text}")
     return response.json()
 
+def ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds):
+    scene_json = prompt_file.with_suffix('.scene_prompts.json')
+    if scene_json.exists():
+        with open(scene_json, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    # Generate scene prompts JSON
+    print(f"[INFO] Generating scene prompts JSON at {scene_json} ...")
+    prompts = generate_prompts_for_segments(
+        segment_transcript(transcript, mode=segmentation_mode, window_seconds=window_seconds),
+        llm_config, prompt_type='scene', max_chars=100)
+    if not prompts:
+        print(f"[WARN] No prompts generated for scene prompts JSON at {scene_json}.")
+        return None
+    save_scene_prompts_json(prompts, scene_json)
+    return prompts
+
+def unload_llm_model(llm_config=None):
+    cmd = ['lms', 'unload', '--all']
+    # Optionally add host/port from config
+    if llm_config:
+        host = llm_config.get('host')
+        port = llm_config.get('port')
+        if host:
+            cmd += ['--host', str(host)]
+        if port:
+            cmd += ['--port', str(port)]
+    print(f"[INFO] Unloading LLM model with command: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        print(f"[INFO] LLM unload stdout: {result.stdout.strip()}")
+        if result.stderr:
+            print(f"[WARN] LLM unload stderr: {result.stderr.strip()}")
+        if result.returncode != 0:
+            print(f"[WARN] LLM unload command exited with code {result.returncode}")
+    except Exception as e:
+        print(f"[WARN] Failed to unload LLM model: {e}")
+
 def main():
     parser = argparse.ArgumentParser(description="ComfyUI Image Generator Extension for The-Machine")
     parser.add_argument('--run-folder', type=str, required=True, help='Path to run-YYYYMMDD-HHMMSS output folder')
@@ -444,17 +515,32 @@ def main():
     parser.add_argument('--master-transcript', type=str, help='Path to a master transcript file to use for LLM prompt generation (overrides automatic search)')
     parser.add_argument('--segmentation-mode', type=str, choices=['time', 'utterance'], default='time', help='Scene segmentation mode: time (default) or utterance')
     parser.add_argument('--window-seconds', type=int, default=30, help='Time window size in seconds for scene segmentation (default: 30)')
+    parser.add_argument('--llm-model', type=str, help='Override the LLM model used for prompt generation (default: auto per mode)')
+    parser.add_argument('--pause-after-prompts', action='store_true', help='Pause after prompt generation to allow manual LLM unload before ComfyUI jobs')
+    parser.add_argument('--video', action='store_true', help='Use video workflow and output video segments')
+    parser.add_argument('--image', action='store_true', help='Use image workflow and output images')
+    parser.add_argument('--image-workflow', type=str, default='extensions/ComfyUI/theMachine_SDXL_Basic.json', help='Path to ComfyUI image workflow JSON (default: theMachine_SDXL_Basic.json)')
     args = parser.parse_args()
 
     run_folder = Path(args.run_folder)
     if not run_folder.exists():
         raise FileNotFoundError(f"Run folder not found: {run_folder}")
-    output_dir = Path(args.output_dir) if args.output_dir else run_folder / 'comfyui_images'
-    output_dir.mkdir(parents=True, exist_ok=True)
+    video_output_dir = Path(args.output_dir) if args.output_dir and args.video else run_folder / 'comfyui_videos'
+    image_output_dir = Path(args.output_dir) if args.output_dir and args.image and not args.video else run_folder / 'comfyui_images'
+    if args.video:
+        video_output_dir.mkdir(parents=True, exist_ok=True)
+    if args.image:
+        image_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load workflow
-    with open(args.workflow, 'r', encoding='utf-8') as f:
-        workflow_template = json.load(f)
+    # Load workflow templates
+    workflow_template_video = None
+    workflow_template_image = None
+    if args.video:
+        with open(args.workflow, 'r', encoding='utf-8') as f:
+            workflow_template_video = json.load(f)
+    if args.image:
+        with open(args.image_workflow, 'r', encoding='utf-8') as f:
+            workflow_template_image = json.load(f)
 
     llm_dir = run_folder / 'llm'
     if not llm_dir.exists():
@@ -464,24 +550,181 @@ def main():
     # Find all call subfolders in llm/
     call_folders = [d for d in llm_dir.iterdir() if d.is_dir()]
     single_file_prompt = llm_dir / 'sdxl_image_prompt.txt'
+
+    # Helper to get call name/id for output naming
+    def get_call_name_or_id(call_folder):
+        return call_folder.name
+
+    # Helper to load scene prompts JSON, generating if missing
+    def ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds):
+        scene_json = prompt_file.with_suffix('.scene_prompts.json')
+        if scene_json.exists():
+            with open(scene_json, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        # Generate scene prompts JSON
+        print(f"[INFO] Generating scene prompts JSON at {scene_json} ...")
+        prompts = generate_prompts_for_segments(
+            segment_transcript(transcript, mode=segmentation_mode, window_seconds=window_seconds),
+            llm_config, prompt_type='scene', max_chars=100)
+        if not prompts:
+            print(f"[WARN] No prompts generated for scene prompts JSON at {scene_json}.")
+            return None
+        save_scene_prompts_json(prompts, scene_json)
+        return prompts
+
+    video_jobs = []  # (call_name, call_output_dir, scene_idx, prompt)
+    image_jobs = []  # (call_name, call_output_dir, prompt)
+
     if call_folders:
         # Multi-call mode
         for call_folder in call_folders:
             call_id = call_folder.name
-            prompt = get_or_generate_prompt(call_folder, run_folder, fallback_prompt="A surreal, privacy-safe image.", args=args)
-            prompt = postprocess_prompt(prompt, max_chars=300)
-            print(f"[INFO] Processing call {call_id} with prompt: {repr(prompt)}")
-            # Prepare workflow for this call
-            workflow = json.loads(json.dumps(workflow_template))  # Deep copy
-            workflow = update_workflow_prompt(workflow, prompt, batch_size=args.batch_size, seed=args.seed)
-            call_output_dir = output_dir / call_id
+            call_name = get_call_name_or_id(call_folder)
+            if args.video:
+                call_output_dir = video_output_dir / call_name
+                call_output_dir.mkdir(parents=True, exist_ok=True)
+                # Video mode: ensure scene prompts JSON exists
+                prompt_file = call_folder / 'sdxl_image_prompt.txt'
+                # Robust transcript lookup
+                transcript = None
+                if args.master_transcript:
+                    transcript_path = Path(args.master_transcript)
+                    if transcript_path.exists():
+                        transcript = transcript_path.read_text(encoding='utf-8').strip()
+                if not transcript:
+                    transcript = find_transcript_for_call_any(run_folder, call_name)
+                if not transcript:
+                    transcript = find_transcript_for_call_any(run_folder, call_id)
+                llm_config_path = Path('workflows/llm_tasks.json')
+                if not llm_config_path.exists():
+                    print("[ERROR] workflows/llm_tasks.json not found. Skipping.")
+                    continue
+                with open(llm_config_path, 'r', encoding='utf-8') as f:
+                    llm_config = json.load(f)
+                # Always use default LLM model for prompt generation
+                llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'
+                segmentation_mode = getattr(args, 'segmentation_mode', 'time') if args else 'time'
+                window_seconds = getattr(args, 'window_seconds', 30) if args else 30
+                scene_prompts = ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds)
+                if not scene_prompts:
+                    print(f"[ERROR] No scene prompts JSON found or generated for call {call_name}. Skipping.")
+                    continue
+                for idx, scene in enumerate(scene_prompts):
+                    prompt = postprocess_prompt(scene['prompt'], max_chars=300)
+                    video_jobs.append((call_name, call_output_dir, idx, prompt))
+            if args.image:
+                call_output_dir = image_output_dir / call_name
+                call_output_dir.mkdir(parents=True, exist_ok=True)
+                prompt = get_or_generate_prompt(call_folder, run_folder, fallback_prompt="A surreal, privacy-safe image.", args=args)
+                prompt = postprocess_prompt(prompt, max_chars=300)
+                image_jobs.append((call_name, call_output_dir, prompt))
+
+    elif single_file_prompt.exists():
+        # Single-file mode
+        call_name = 'single_file'
+        if args.video:
+            call_output_dir = video_output_dir / call_name
             call_output_dir.mkdir(parents=True, exist_ok=True)
-            # Call ComfyUI API
-            print(f"[INFO] Sending workflow for call {call_id} to ComfyUI API at {args.api_url} ...")
+            # Video mode: ensure scene prompts JSON exists
+            transcript = None
+            if args.master_transcript:
+                transcript_path = Path(args.master_transcript)
+                if transcript_path.exists():
+                    transcript = transcript_path.read_text(encoding='utf-8').strip()
+            if not transcript:
+                finalized_soundbites = run_folder / 'finalized' / 'soundbites'
+                all_transcripts = list(finalized_soundbites.glob('*/'*1 + '*_master_transcript.txt'))
+                if len(all_transcripts) == 1:
+                    transcript = all_transcripts[0].read_text(encoding='utf-8').strip()
+                elif len(all_transcripts) > 1:
+                    print(f"[WARN] Multiple transcripts found in single-file mode. Using the first one: {all_transcripts[0]}")
+                    transcript = all_transcripts[0].read_text(encoding='utf-8').strip()
+            llm_config_path = Path('workflows/llm_tasks.json')
+            if not llm_config_path.exists():
+                print("[ERROR] workflows/llm_tasks.json not found. Skipping.")
+            else:
+                with open(llm_config_path, 'r', encoding='utf-8') as f:
+                    llm_config = json.load(f)
+                llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'
+                segmentation_mode = getattr(args, 'segmentation_mode', 'time') if args else 'time'
+                window_seconds = getattr(args, 'window_seconds', 30) if args else 30
+                scene_prompts = ensure_scene_prompts_json(single_file_prompt, transcript, llm_config, segmentation_mode, window_seconds)
+                if not scene_prompts:
+                    print(f"[ERROR] No scene prompts JSON found or generated for single-file mode. Skipping.")
+                else:
+                    for idx, scene in enumerate(scene_prompts):
+                        prompt = postprocess_prompt(scene['prompt'], max_chars=300)
+                        video_jobs.append((call_name, call_output_dir, idx, prompt))
+        if args.image:
+            call_output_dir = image_output_dir / call_name
+            call_output_dir.mkdir(parents=True, exist_ok=True)
+            prompt = get_or_generate_singlefile_prompt(llm_dir, run_folder, fallback_prompt="A surreal, privacy-safe image.", args=args)
+            prompt = postprocess_prompt(prompt, max_chars=300)
+            image_jobs.append((call_name, call_output_dir, prompt))
+
+    # PHASE 1 COMPLETE: All prompts and ComfyUI jobs are now defined
+    print("\n[INFO] All prompts and ComfyUI job configs generated.")
+    print(f"[INFO] Total video jobs to run: {len(video_jobs)}")
+    print(f"[INFO] Total image jobs to run: {len(image_jobs)}")
+
+    # Attempt to unload LLM model before ComfyUI jobs
+    llm_config_path = Path('workflows/llm_tasks.json')
+    llm_config = None
+    if llm_config_path.exists():
+        with open(llm_config_path, 'r', encoding='utf-8') as f:
+            try:
+                llm_config = json.load(f)
+            except Exception:
+                llm_config = None
+    unload_llm_model(llm_config)
+
+    if args.pause_after_prompts:
+        input("[INFO] You may now unload the LLM model. Press Enter to begin ComfyUI jobs...")
+    else:
+        print("[INFO] Proceeding to ComfyUI job execution...")
+
+    # PHASE 2: Execute jobs according to mode
+    if args.video and not args.image:
+        print("[INFO] Running in VIDEO-ONLY mode. Only video jobs will be sent to ComfyUI.")
+        for job in video_jobs:
+            call_name, call_output_dir, idx, prompt = job
+            print(f"[INFO] Processing video scene {idx+1} for call {call_name} with prompt: {repr(prompt)}")
+            workflow = json.loads(json.dumps(workflow_template_video))  # Deep copy
+            print(f"[INFO] Using workflow: {args.workflow}")
+            workflow = update_workflow_prompt(workflow, prompt, batch_size=args.batch_size, seed=args.seed)
+            print(f"[INFO] Sending video workflow for call {call_name} scene {idx+1} to ComfyUI API at {args.api_url} ...")
             result = call_comfyui_api(args.api_url, workflow)
-            print(f"[INFO] ComfyUI API response for call {call_id}: {result}")
-            # TODO: Move/copy images from ComfyUI output dir to call_output_dir
-            # Optionally update manifest
+            print(f"[INFO] ComfyUI API response for call {call_name} scene {idx+1}: {result}")
+            if args.update_manifest:
+                manifest_path = run_folder / 'manifest.json'
+                if manifest_path.exists():
+                    with open(manifest_path, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+                else:
+                    manifest = []
+                manifest.append({
+                    'stage': 'comfyui_video_generation',
+                    'call_id': call_name,
+                    'scene_index': idx,
+                    'prompt': prompt,
+                    'workflow': str(args.workflow),
+                    'output_dir': str(call_output_dir),
+                    'result': result
+                })
+                with open(manifest_path, 'w', encoding='utf-8') as f:
+                    json.dump(manifest, f, indent=2)
+                print(f"[INFO] Manifest updated at {manifest_path}")
+    elif args.image and not args.video:
+        print("[INFO] Running in IMAGE-ONLY mode. Only image jobs will be sent to ComfyUI.")
+        for job in image_jobs:
+            call_name, call_output_dir, prompt = job
+            print(f"[INFO] Processing image job for call {call_name} with prompt: {repr(prompt)}")
+            workflow = json.loads(json.dumps(workflow_template_image))  # Deep copy
+            print(f"[INFO] Using workflow: {args.image_workflow}")
+            workflow = update_workflow_prompt(workflow, prompt, batch_size=args.batch_size, seed=args.seed)
+            print(f"[INFO] Sending image workflow for call {call_name} to ComfyUI API at {args.api_url} ...")
+            result = call_comfyui_api(args.api_url, workflow)
+            print(f"[INFO] ComfyUI API response for call {call_name}: {result}")
             if args.update_manifest:
                 manifest_path = run_folder / 'manifest.json'
                 if manifest_path.exists():
@@ -491,7 +734,37 @@ def main():
                     manifest = []
                 manifest.append({
                     'stage': 'comfyui_image_generation',
-                    'call_id': call_id,
+                    'call_id': call_name,
+                    'prompt': prompt,
+                    'workflow': str(args.image_workflow),
+                    'output_dir': str(call_output_dir),
+                    'result': result
+                })
+                with open(manifest_path, 'w', encoding='utf-8') as f:
+                    json.dump(manifest, f, indent=2)
+                print(f"[INFO] Manifest updated at {manifest_path}")
+    elif args.video and args.image:
+        print("[INFO] Running in BOTH VIDEO and IMAGE mode. Video jobs will be sent first, then image jobs.")
+        for job in video_jobs:
+            call_name, call_output_dir, idx, prompt = job
+            print(f"[INFO] Processing video scene {idx+1} for call {call_name} with prompt: {repr(prompt)}")
+            workflow = json.loads(json.dumps(workflow_template_video))  # Deep copy
+            print(f"[INFO] Using workflow: {args.workflow}")
+            workflow = update_workflow_prompt(workflow, prompt, batch_size=args.batch_size, seed=args.seed)
+            print(f"[INFO] Sending video workflow for call {call_name} scene {idx+1} to ComfyUI API at {args.api_url} ...")
+            result = call_comfyui_api(args.api_url, workflow)
+            print(f"[INFO] ComfyUI API response for call {call_name} scene {idx+1}: {result}")
+            if args.update_manifest:
+                manifest_path = run_folder / 'manifest.json'
+                if manifest_path.exists():
+                    with open(manifest_path, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+                else:
+                    manifest = []
+                manifest.append({
+                    'stage': 'comfyui_video_generation',
+                    'call_id': call_name,
+                    'scene_index': idx,
                     'prompt': prompt,
                     'workflow': str(args.workflow),
                     'output_dir': str(call_output_dir),
@@ -500,36 +773,35 @@ def main():
                 with open(manifest_path, 'w', encoding='utf-8') as f:
                     json.dump(manifest, f, indent=2)
                 print(f"[INFO] Manifest updated at {manifest_path}")
-    elif single_file_prompt.exists():
-        # Single-file mode
-        prompt = get_or_generate_singlefile_prompt(llm_dir, run_folder, fallback_prompt="A surreal, privacy-safe image.", args=args)
-        prompt = postprocess_prompt(prompt, max_chars=300)
-        print(f"[INFO] Processing single-file prompt: {repr(prompt)}")
-        workflow = update_workflow_prompt(workflow_template, prompt, batch_size=args.batch_size, seed=args.seed)
-        # Call ComfyUI API
-        print(f"[INFO] Sending workflow to ComfyUI API at {args.api_url} ...")
-        result = call_comfyui_api(args.api_url, workflow)
-        print(f"[INFO] ComfyUI API response: {result}")
-        # TODO: Move/copy images from ComfyUI output dir to output_dir
-        if args.update_manifest:
-            manifest_path = run_folder / 'manifest.json'
-            if manifest_path.exists():
-                with open(manifest_path, 'r', encoding='utf-8') as f:
-                    manifest = json.load(f)
-            else:
-                manifest = []
-            manifest.append({
-                'stage': 'comfyui_image_generation',
-                'prompt': prompt,
-                'workflow': str(args.workflow),
-                'output_dir': str(output_dir),
-                'result': result
-            })
-            with open(manifest_path, 'w', encoding='utf-8') as f:
-                json.dump(manifest, f, indent=2)
-            print(f"[INFO] Manifest updated at {manifest_path}")
+        for job in image_jobs:
+            call_name, call_output_dir, prompt = job
+            print(f"[INFO] Processing image job for call {call_name} with prompt: {repr(prompt)}")
+            workflow = json.loads(json.dumps(workflow_template_image))  # Deep copy
+            print(f"[INFO] Using workflow: {args.image_workflow}")
+            workflow = update_workflow_prompt(workflow, prompt, batch_size=args.batch_size, seed=args.seed)
+            print(f"[INFO] Sending image workflow for call {call_name} to ComfyUI API at {args.api_url} ...")
+            result = call_comfyui_api(args.api_url, workflow)
+            print(f"[INFO] ComfyUI API response for call {call_name}: {result}")
+            if args.update_manifest:
+                manifest_path = run_folder / 'manifest.json'
+                if manifest_path.exists():
+                    with open(manifest_path, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+                else:
+                    manifest = []
+                manifest.append({
+                    'stage': 'comfyui_image_generation',
+                    'call_id': call_name,
+                    'prompt': prompt,
+                    'workflow': str(args.image_workflow),
+                    'output_dir': str(call_output_dir),
+                    'result': result
+                })
+                with open(manifest_path, 'w', encoding='utf-8') as f:
+                    json.dump(manifest, f, indent=2)
+                print(f"[INFO] Manifest updated at {manifest_path}")
     else:
-        print("[ERROR] No sdxl_image_prompt.txt found in llm/ or any subfolder. Nothing to process.")
+        print("[ERROR] No jobs to run. Please specify --video and/or --image.")
 
 if __name__ == '__main__':
     main() 

@@ -13,6 +13,10 @@ Documents system architecture, key technical decisions, design patterns, and com
 - **All CLAP logic has been removed from the main pipeline. CLAP segmentation/detection is now handled exclusively by the extension (clap_segmentation_experiment.py). The main pipeline is fully decoupled from CLAP.**
 - **Extensions system is formalized: external scripts in extensions/ can be run as pre- or post-processing, either manually or via CLI.**
 - **LLM processing is handled as a modular 'bus' and is only run if defined in the workflow JSON. Per-workflow LLM config is supported.**
+- **NEW: ComfyUI extension enables LLM-driven, scene-based prompt generation for both image and video workflows, with hierarchical summarization and batching.**
+- **NEW: Two-phase extension execution: all prompts and ComfyUI job configs are generated first, then LLM is unloaded before jobs are sent.**
+- **NEW: Robust workflow selection and prompt insertion logic: only positive prompt nodes are updated in ComfyUI workflows, never negative.**
+- **NEW: Extension system is now the standard for all non-core pipeline logic, including image/video generation and CLAP segmentation.**
 
 ## Key Technical Decisions
 
