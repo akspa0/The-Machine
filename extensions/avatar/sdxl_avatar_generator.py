@@ -113,6 +113,14 @@ def set_random_seed_in_workflow(wf_json):
             node['inputs']['noise_seed'] = random.randint(0, 2**32 - 1)
     return wf_json
 
+# Define the system prompt for persona processing
+SYSTEM_PROMPT = (
+    "You are an expert at writing SDXL image prompts for creative, visually rich character portraits. "
+    "Always treat the input as a character or person, even if it is a business, object, or odd name—personify it as needed. "
+    "Favor creativity, absurd humor, and surreal situations in your prompt generation. "
+    "Your output will be used to generate a unique, memorable, and visually striking image."
+)
+
 def main():
     parser = argparse.ArgumentParser(description='Generate SDXL persona and backdrop images for each call/persona.')
     parser.add_argument('--persona-manifest', type=str, required=True, help='Path to persona_manifest.json')
@@ -197,6 +205,18 @@ def main():
                 wf_json['14']['inputs']['text'] = persona_md
             else:
                 print(f"[WARN] Node 14 not found in workflow JSON for {call_id} {speaker}. Skipping.")
+                continue
+            # Insert persona_md text into node 1's text input
+            if '1' in wf_json and 'inputs' in wf_json['1']:
+                wf_json['1']['inputs']['text'] = persona_md
+            else:
+                print(f"[WARN] Node 1 not found in workflow JSON for {call_id} {speaker}. Skipping.")
+                continue
+            # Insert system prompt into node 13's system_message
+            if '13' in wf_json and 'inputs' in wf_json['13']:
+                wf_json['13']['inputs']['system_message'] = SYSTEM_PROMPT
+            else:
+                print(f"[WARN] Node 13 not found in workflow JSON for {call_id} {speaker}. Skipping.")
                 continue
             wf_json = set_random_seed_in_workflow(wf_json)
             image_path = run_comfyui_workflow(wf_json, output_path, api_url=args.api_url)

@@ -17,7 +17,7 @@
   },
   "2": {
     "inputs": {
-      "text": "embedding:bad-hands-5, embedding:ng_deepnegative_v1_75t, kids, child, girl, boy,",
+      "text": "embedding:bad-hands-5, embedding:ng_deepnegative_v1_75t, kids, child, girl, boy, watermark, text, logo, children, young adult, ",
       "clip": [
         "7",
         1
@@ -196,7 +196,7 @@
       "ip": "localhost",
       "port": 1234,
       "temperature": 0.5000000000000001,
-      "max_tokens": 600,
+      "max_tokens": 300,
       "unload_llm": true,
       "unload_comfy_models": true,
       "prompt": [
