@@ -7,6 +7,10 @@ from llm_utils import run_llm_task
 import argparse
 from pydub import AudioSegment
 import re
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from llm_tokenize import split_text_to_token_chunks
+from llm_summarize import summarize_chunks_with_llm
 
 """
 Usage:
@@ -152,10 +156,11 @@ def sanitize_title(title):
     return title[:48] or None
 
 class CharacterPersonaBuilder(ExtensionBase):
-    def __init__(self, output_root, llm_config_path=None):
+    def __init__(self, output_root, llm_config_path=None, max_tokens=4096):
         super().__init__(output_root)
         self.llm_config_path = llm_config_path or 'workflows/llm_tasks.json'
         self.llm_config = self._load_llm_config()
+        self.max_tokens = max_tokens
 
     def _load_llm_config(self):
         config_path = Path(self.llm_config_path)
@@ -183,6 +188,20 @@ class CharacterPersonaBuilder(ExtensionBase):
             if sanitized:
                 return sanitized
         return call_id
+
+    def generate_persona(self, persona_input):
+        # If input is too long, chunk and summarize
+        # Always use a tiktoken-supported encoding for chunking
+        chunks = split_text_to_token_chunks(persona_input, max_tokens=self.max_tokens, model='gpt-3.5-turbo')
+        responses = []
+        for chunk in chunks:
+            response = run_llm_task(chunk, self.llm_config, single_output=True, chunking=False)
+            responses.append(response.strip())
+        if len(responses) > 1:
+            summary = summarize_chunks_with_llm(responses, self.llm_config)
+            return summary
+        else:
+            return responses[0]
 
     def run(self):
         speakers_root = self.output_root / 'speakers'
@@ -225,11 +244,10 @@ class CharacterPersonaBuilder(ExtensionBase):
                         out_dir.mkdir(parents=True, exist_ok=True)
                         transcript_path = out_dir / 'speaker_transcript.txt'
                         transcript_path.write_text(transcript, encoding='utf-8')
-                        user_prompt = (
-                            f"Given the following transcript, generate a Character.AI persona {LENNYBOT_STYLE_NOTE}. Transcript:\n{transcript}"
-                        )
+                        persona_input = transcript
+                        persona_text = self.generate_persona(persona_input)
                         persona_path = out_dir / 'persona.md'
-                        persona = run_llm_task(user_prompt, self.llm_config, output_path=persona_path, seed=None)
+                        persona_path.write_text(persona_text, encoding='utf-8')
                         audio_clips = create_audio_clips(utts, out_dir, speaker_id)
                         # Collect all .wav files for this speaker
                         source_audio_paths = [str(u['wav_file']) for u in utts if u['wav_file'] is not None]
@@ -256,11 +274,10 @@ class CharacterPersonaBuilder(ExtensionBase):
                     out_dir.mkdir(parents=True, exist_ok=True)
                     transcript_path = out_dir / 'channel_transcript.txt'
                     transcript_path.write_text(transcript, encoding='utf-8')
-                    user_prompt = (
-                        f"Given the following transcript, generate a Character.AI persona {LENNYBOT_STYLE_NOTE}. Transcript:\n{transcript}"
-                    )
+                    persona_input = transcript
+                    persona_text = self.generate_persona(persona_input)
                     persona_path = out_dir / 'persona.md'
-                    persona = run_llm_task(user_prompt, self.llm_config, output_path=persona_path, seed=None)
+                    persona_path.write_text(persona_text, encoding='utf-8')
                     audio_clips = create_audio_clips(utts, out_dir, norm)
                     # Collect all .wav files for this channel
                     source_audio_paths = [str(u['wav_file']) for u in utts if u['wav_file'] is not None]
@@ -282,6 +299,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Character Persona Builder Extension")
     parser.add_argument('output_root', type=str, help='Root output folder (parent of speakers/)')
     parser.add_argument('--llm-config', type=str, default=None, help='Path to LLM config JSON (default: workflows/llm_tasks.json)')
+    parser.add_argument('--max-tokens', type=int, default=4096, help='Max tokens per LLM chunk (default: 4096, max: 8192).')
     args = parser.parse_args()
-    ext = CharacterPersonaBuilder(args.output_root, llm_config_path=args.llm_config)
+    max_tokens = min(args.max_tokens, 8192)
+    ext = CharacterPersonaBuilder(args.output_root, llm_config_path=args.llm_config, max_tokens=max_tokens)
     ext.run() 
