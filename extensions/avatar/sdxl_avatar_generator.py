@@ -188,11 +188,16 @@ def main():
             # There should be only one persona.md per speaker per call
             entry = entries[0]
             persona_md = read_persona_md(entry['persona_path'])
-            prompt = generate_llm_prompt_for_persona(persona_md, llm_config)
             persona_dir = comfyui_images / call_id / speaker
             persona_dir.mkdir(parents=True, exist_ok=True)
             output_path = persona_dir / 'persona_workflow.json'
-            wf_json = update_workflow_json(avatar_workflow, prompt, avatar_workflow['10']['inputs']['width'], avatar_workflow['10']['inputs']['height'])
+            wf_json = update_workflow_json(avatar_workflow, '', avatar_workflow['10']['inputs']['width'], avatar_workflow['10']['inputs']['height'])
+            # Insert persona_md text into node 14's text input
+            if '14' in wf_json and 'inputs' in wf_json['14']:
+                wf_json['14']['inputs']['text'] = persona_md
+            else:
+                print(f"[WARN] Node 14 not found in workflow JSON for {call_id} {speaker}. Skipping.")
+                continue
             wf_json = set_random_seed_in_workflow(wf_json)
             image_path = run_comfyui_workflow(wf_json, output_path, api_url=args.api_url)
             persona_map[f"{call_id}_{speaker}"] = str(image_path)
