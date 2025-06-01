@@ -1,6 +1,6 @@
 # Avatar SDXL Generator Extension for The-Machine
 
-This extension generates persona (avatar) and backdrop images for each call/persona using SDXL workflows, with per-task workflow customization. It is designed for use with The-Machine pipeline and supports compositing, chroma-keying, and advanced avatar video workflows.
+> **Note:** This extension is part of The-Machine's extension-driven, API-first, librarian-orchestrator architecture. See the main project README for global philosophy, privacy, and best practices.
 
 ---
 
@@ -8,6 +8,7 @@ This extension generates persona (avatar) and backdrop images for each call/pers
 - **Persona/Avatar Images:** Generate 1024x1024 green-screened images for each speaker/persona, suitable for lipsyncing and compositing.
 - **Backdrop Images:** Generate wide (e.g., 1368x768) environmental images for each call, to serve as the set or background for composited avatars.
 - **Workflow Customization:** Use separate, tweakable SDXL workflow JSONs for avatars and backdrops, allowing for per-task optimization (LoRA, prompt, negative prompt, etc.).
+- **Integration:** This extension is invoked after persona generation and uses the persona manifest for all image generation. All outputs are copied into the canonical project structure and tracked in the manifest.
 
 ---
 
@@ -50,28 +51,25 @@ python extensions/avatar/sdxl_avatar_generator.py \
 
 ---
 
+## Using LLM Utilities for Prompt Generation
+- For complex or large persona descriptions, use `llm_tokenize.py` to chunk persona files and `llm_summarize.py` to generate creative SDXL prompts for avatars or backdrops.
+- See the main README for detailed usage examples.
+
+---
+
 ## Integration with The-Machine
 - Run after persona generation (`character_persona_builder.py`).
 - Uses the persona manifest to generate images for each persona and call.
 - Outputs are ready for downstream animation, lipsync, and compositing steps.
-
----
-
-## Troubleshooting & Best Practices
-- If a workflow file is missing or broken, the script will warn and skip that task.
-- Use the `--initial-prompt` option to control style (drawing, photo, etc.).
-- Tweak workflow JSONs for best results per task.
 - All outputs and logs are PII-free and traceable.
 
 ---
 
-## Example Usage
-```sh
-python extensions/avatar/sdxl_avatar_generator.py \
-  --persona-manifest outputs/run-20250530-002206/characters/persona_manifest.json \
-  --output-root outputs/run-20250530-002206 \
-  --initial-prompt "a photograph of"
-```
+## Best Practices
+- Follow privacy, traceability, and idempotence rules.
+- Handle missing or partial data gracefully.
+- Document your extension's purpose and usage.
+- Reference the main README for global architecture and philosophy.
 
 ---
 

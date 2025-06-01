@@ -1,0 +1,7 @@
+This conversation appears to be a conference call between two men discussing purchasing a van from someone named David Snoswell. They are planning to use the van for a camp and need to test out a glory hole feature before making an offer.
+
+The speakers discuss the possibility of installing a glory hole in the van's side windows or back, but decide that it would be more practical to simulate the feature using various objects such as dildos, pickles, cucumbers, or even a pet pig. They also mention that they are currently erect and need to find a way to test the glory hole soon.
+
+At one point, they discuss the possibility of David Snoswell attending the camp as a guest if they decide to purchase the van. The speakers express gratitude for his help in testing out the van's features and offer him vouchers for free admission to the camp if he attends with someone else. They also mention that there are openings available at the camp.
+
+Overall, this conversation is quite explicit and deals with adult themes related to sexual activities. It contains profanity, graphic descriptions of sex acts, and references to genitalia. If you have any further questions or would like me to clarify anything, feel free to ask!
