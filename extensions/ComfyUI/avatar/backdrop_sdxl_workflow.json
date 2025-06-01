@@ -1,7 +1,10 @@
 {
   "1": {
     "inputs": {
-      "text": "a cat eating fish while in a janitor costume, MisterBooXL, in 1994, \"there are lots of random things in the background\",",
+      "text": [
+        "15",
+        0
+      ],
       "clip": [
         "7",
         1
@@ -14,7 +17,7 @@
   },
   "2": {
     "inputs": {
-      "text": "embedding:bad-hands-5, embedding:ng_deepnegative_v1_75t, kids, child, girl, boy,",
+      "text": "embedding:bad-hands-5, embedding:ng_deepnegative_v1_75t, kids, child, girl, boy, watermark, text, logo, children, young adult, ",
       "clip": [
         "7",
         1
@@ -38,7 +41,7 @@
     "inputs": {
       "lora_name": "SDXL\\Boo\\MisterBoo.safetensors",
       "strength_model": 0.8200000000000002,
-      "strength_clip": 1,
+      "strength_clip": 1.0000000000000002,
       "model": [
         "3",
         0
@@ -56,8 +59,8 @@
   "6": {
     "inputs": {
       "lora_name": "SDXL\\mst3cFluxV2-SDXL.safetensors",
-      "strength_model": 1,
-      "strength_clip": 1,
+      "strength_model": 1.0000000000000002,
+      "strength_clip": 1.0000000000000002,
       "model": [
         "4",
         0
@@ -76,7 +79,7 @@
     "inputs": {
       "lora_name": "SDXL\\retroVHS-SDXL_1994-1999_epoch_33.safetensors",
       "strength_model": 0.5000000000000001,
-      "strength_clip": 1,
+      "strength_clip": 1.0000000000000002,
       "model": [
         "6",
         0
@@ -127,9 +130,9 @@
   "9": {
     "inputs": {
       "block_number": 3,
-      "downscale_factor": 2,
+      "downscale_factor": 2.0000000000000004,
       "start_percent": 0,
-      "end_percent": 0.35,
+      "end_percent": 0.3500000000000001,
       "downscale_after_skip": true,
       "downscale_method": "bicubic",
       "upscale_method": "bicubic",
@@ -181,6 +184,50 @@
     "class_type": "SaveImage",
     "_meta": {
       "title": "Save Image"
+    }
+  },
+  "13": {
+    "inputs": {
+      "model_identifier": "l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b",
+      "draft_model": "",
+      "system_message": "You are an AI assistant specialized in generating detailed and creative image prompts for AI image generation. Your task is to expand a given user prompt into a well-structured, vivid, and highly descriptive prompt while ensuring that all terms from the original prompt are included. Enhance the visual quality and artistic impact by adding relevant details, but do not omit or alter any key elements provided by the user. Follow the given instructions or guidelines and respond only with the refined prompt.",
+      "reasoning_tag": "think",
+      "seed": 0,
+      "ip": "localhost",
+      "port": 1234,
+      "temperature": 0.5000000000000001,
+      "max_tokens": 300,
+      "unload_llm": true,
+      "unload_comfy_models": true,
+      "prompt": [
+        "14",
+        0
+      ]
+    },
+    "class_type": "> LMStudio",
+    "_meta": {
+      "title": "😼> LMStudio"
+    }
+  },
+  "14": {
+    "inputs": {
+      "text": "a cat eating fish while in a janitor costume, MisterBooXL, in 1994, \"there are lots of random things in the background\","
+    },
+    "class_type": "Text Multiline",
+    "_meta": {
+      "title": "Text Multiline"
+    }
+  },
+  "15": {
+    "inputs": {
+      "text": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "Text Multiline",
+    "_meta": {
+      "title": "Text Multiline"
     }
   }
 }

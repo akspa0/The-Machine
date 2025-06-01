@@ -1,43 +1,37 @@
 # projectbrief.md
 
 **Purpose:**
-Foundation document that shapes all other files. Defines core requirements and goals. Source of truth for project scope.
+Defines the core requirements, goals, and architecture for the current, extension-driven version of The-Machine.
 
 ## Project Name
 
-Audio Context Tool
+The-Machine: Audio Context Librarian
 
 ## Overview
 
-A privacy-focused, modular pipeline for processing phone call audio and other recordings. The pipeline automates ingestion, PII removal, file tracking, audio separation, CLAP annotation, loudness normalization, speaker diarization, transcription, soundbite extraction, LLM integration, remixing, and show creation. All steps are orchestrated by a PipelineOrchestrator that enforces strict privacy, traceability, and manifest/logging requirements. The system is fully auditable, extensible, and robust to errors and malformed data.
+The-Machine is a modular, privacy-focused audio processing system. The main program acts as a "librarian" orchestrator, managing a growing set of specialized extensions (the "stacks") for all audio, metadata, and AI-driven tasks. The system is designed for extensibility, traceability, and robust automation.
 
 ## Core Requirements
 
-- Handle multiple audio input types, especially phone call tuples (out-, trans_out-, recv_out-)
-- Remove PII from filenames and re-index tuples using a unique, zero-padded chronological index
-- Track files and metadata through all processing steps
-- Audio separation (vocals/instruments)
-- CLAP-based context annotation (with confidence threshold)
-- Loudness normalization (to -14.0 LUFS)
-- Speaker diarization (pyannote)
-- Modular, extensible, and batch-oriented pipeline
-- Robust error handling and defensive filtering
-- LLM integration for downstream tasks
-- All logging and manifest writing is strictly PII-free and only occurs after anonymization
+- The main program (librarian) manages all job orchestration, extension invocation, and data flow.
+- All core logic is implemented as extensions (stacks) that can be independently developed, tested, and swapped.
+- All jobs, files, and data are uniquely identified and tracked for full traceability.
+- Privacy and PII removal are enforced at every stage.
+- All file and job transfers to external tools (e.g., ComfyUI) use robust API-based methods, never direct file system access.
+- Prompts, metadata, and outputs are cached and reused for downstream tasks.
+- The system is ready for a future database (e.g., SQLite) to manage jobs, data, and reference lookups like a real library.
 
 ## Goals
 
-- Automate manual audio editing workflows for privacy and scale
-- Enable dataset creation from phone call audio with full traceability
-- Ensure privacy by removing PII and enforcing anonymized logging/manifesting
-- Maintain traceability and auditability of files and processing lineage
-- Support extensibility and user configuration via CLI and workflow JSONs
+- Enable rapid development and integration of new extensions for audio, AI, and data processing.
+- Ensure all data and jobs are traceable, auditable, and privacy-preserving.
+- Provide a robust, automated, and extensible foundation for future research and production use.
+- Support a database-backed registry for all jobs, files, and metadata.
 
 ## Scope
 
-- In scope: All pipeline stages, privacy enforcement, manifest/logging, LLM/CLAP integration, error handling, extensibility
-- Out of scope: UI, deployment, advanced analytics (for now)
+- In scope: Extension-driven architecture, librarian orchestrator, API-based job/data transfer, privacy enforcement, traceability, database-ready design.
+- Out of scope: UI, deployment, legacy pipeline logic, non-extension-based workflows.
 
-## 2024-06-XX: Project Milestone
-- All core requirements and goals are satisfied.
-- Pipeline is stable, robust, and production-ready. 
+## 2025-XX-XX: Project Milestone
+- The system is fully extension-driven, robust, and ready for database integration and further extension work. 

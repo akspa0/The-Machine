@@ -34,6 +34,11 @@ Options:
     --video          Use video workflow and output video segments
     --image          Use image workflow and output images
     --image-workflow Path to ComfyUI image workflow JSON (default: theMachine_SDXL_Basic.json)
+    --max-tokens     Maximum number of tokens for segment generation (default: 4096, max: 16384, hard cap: 23000)
+    --force          Force regeneration of all prompts and scene prompt JSONs, even if they already exist.
+    --lms-load-model Path to LM Studio model to load before running jobs (overrides workflow model).
+    --lms-context-length Context length to use when loading LM Studio model (default: 4096).
+    --llm-list-models List available LM Studio models using lms ls and exit.
 
 All outputs and logs are anonymized and PII-free.
 """
@@ -45,11 +50,12 @@ import requests
 from datetime import datetime
 import sys
 sys.path.append(str(Path(__file__).parent))
-from llm_utils import run_llm_task
+from llm_utils import run_llm_task, load_lm_studio_model
 from glob import glob
 import difflib
 import re
 import subprocess
+import tiktoken
 
 # Tokenization utility
 try:
@@ -270,25 +276,80 @@ def batch_run_llm(prompts, llm_config):
             responses.append(result.strip())
     return responses
 
-def generate_prompts_for_segments(segments, llm_config, prompt_type='scene', max_chars=100):
+def segment_transcript_token_aware(transcript, window_seconds=90, max_tokens=4096, model="gpt-3.5-turbo"): 
+    """
+    Segment transcript into windows of up to window_seconds, ensuring each segment does not exceed max_tokens.
+    If a segment would exceed the token limit, backtrack to the last sentence/utterance boundary before the limit.
+    Returns a list of segments, each with start, end, text, and lines (list of dicts with start, end, speaker, text).
+    """
+    enc = tiktoken.encoding_for_model(model)
+    # Parse transcript lines with timestamps and speaker info
+    time_line_re = re.compile(r'\[(.*?)\]\[(.*?)\]\[(\d+\.\d+)-(\d+\.\d+)\]: (.*)')
+    lines = []
+    for line in transcript.splitlines():
+        m = time_line_re.match(line)
+        if not m:
+            continue
+        channel, speaker, start, end, text = m.group(1), m.group(2), float(m.group(3)), float(m.group(4)), m.group(5)
+        lines.append({'start': start, 'end': end, 'speaker': speaker, 'channel': channel, 'text': text, 'raw': line})
+    if not lines:
+        return []
+    segments = []
+    current = []
+    current_tokens = 0
+    current_start = lines[0]['start']
+    current_end = lines[0]['end']
+    for i, line in enumerate(lines):
+        line_tokens = len(enc.encode(line['text']))
+        if (current and (current_tokens + line_tokens > max_tokens or line['end'] - current_start > window_seconds)):
+            segment_text = '\n'.join([l['raw'] for l in current])
+            segments.append({'start': current_start, 'end': current_end, 'text': segment_text, 'lines': current.copy()})
+            current = []
+            current_tokens = 0
+            current_start = line['start']
+        current.append(line)
+        current_tokens += line_tokens
+        current_end = line['end']
+    if current:
+        segment_text = '\n'.join([l['raw'] for l in current])
+        segments.append({'start': current_start, 'end': current_end, 'text': segment_text, 'lines': current.copy()})
+    for seg in segments:
+        seg_tokens = len(enc.encode(seg['text']))
+        if seg_tokens > max_tokens:
+            print(f"[WARN] Segment from {seg['start']}s to {seg['end']}s truncated to fit token limit ({max_tokens}).")
+            sentences = re.split(r'(?<=[.!?]) +', seg['text'])
+            acc = ''
+            acc_tokens = 0
+            for sent in sentences:
+                sent_tokens = len(enc.encode(sent))
+                if acc_tokens + sent_tokens > max_tokens:
+                    break
+                acc += sent + ' '
+                acc_tokens += sent_tokens
+            seg['text'] = acc.strip()
+    return segments
+
+def generate_prompts_for_segments_token_aware(transcript, llm_config, window_seconds=90, max_tokens=4096, model="gpt-3.5-turbo", prompt_type='scene', max_chars=100):
+    segments = segment_transcript_token_aware(transcript, window_seconds, max_tokens, model)
     prompts = []
     prompt_texts = []
     for seg in segments:
+        # Log number of lines and preview
+        print(f"[INFO] Scene {seg['start']:.2f}-{seg['end']:.2f}s: {len(seg['lines'])} lines. Preview: {seg['lines'][0]['raw'] if seg['lines'] else '[empty]'}")
         if prompt_type == 'scene':
             prompt = (
-                f"Summarize the following conversation segment (from {seg['start']:.2f}s to {seg['end']:.2f}s) into a concise, visually descriptive phrase for an SDXL image or video prompt. "
-                f"Avoid repetition and keep it under {max_chars} characters.\n\n{seg['text']}\n\nPrompt:"
+                f"Given the following scene transcript (multiple lines, speakers, and timestamps), generate a concise, visually descriptive, dynamic phrase for an SDXL image or video prompt. "
+                f"Capture the key action, mood, and context. Avoid repetition and keep it under {max_chars} characters.\n\n{seg['text']}\n\nPrompt:"
             )
         else:
             prompt = seg['text']
         prompt_texts.append(prompt)
-    # Batch LLM call
     responses = batch_run_llm(prompt_texts, llm_config)
     for i, seg in enumerate(segments):
         prompt_text = responses[i] if i < len(responses) else ""
         if len(prompt_text) > max_chars:
             prompt_text = prompt_text[:max_chars]
-        prompts.append({'start': seg['start'], 'end': seg['end'], 'prompt': prompt_text})
+        prompts.append({'start': seg['start'], 'end': seg['end'], 'prompt': prompt_text, 'lines': seg['lines']})
     return prompts
 
 def save_scene_prompts_json(prompts, output_path):
@@ -296,23 +357,15 @@ def save_scene_prompts_json(prompts, output_path):
         json.dump(prompts, f, indent=2)
     print(f"[INFO] Scene prompts saved to {output_path}")
 
-def run_llm_scene_based(transcript, llm_config, output_path=None, segmentation_mode='time', window_seconds=30):
-    segments = segment_transcript(transcript, mode=segmentation_mode, window_seconds=window_seconds)
-    if not segments:
-        print("[WARN] No valid segments found in transcript.")
-        if output_path is not None:
-            Path(output_path).write_text("A surreal, privacy-safe image.", encoding='utf-8')
-        return "A surreal, privacy-safe image."
-    prompts = generate_prompts_for_segments(segments, llm_config, prompt_type='scene', max_chars=100)
+def run_llm_scene_based_token_aware(transcript, llm_config, output_path=None, window_seconds=90, max_tokens=4096, model="gpt-3.5-turbo", prompt_type='scene', max_chars=100):
+    prompts = generate_prompts_for_segments_token_aware(transcript, llm_config, window_seconds, max_tokens, model, prompt_type, max_chars)
     if not prompts:
         print("[WARN] No prompts generated from segments.")
         if output_path is not None:
             Path(output_path).write_text("A surreal, privacy-safe image.", encoding='utf-8')
         return "A surreal, privacy-safe image."
-    # Save all prompts as JSON for downstream workflow
     if output_path is not None:
-        save_scene_prompts_json(prompts, output_path.with_suffix('.scene_prompts.json'))
-    # Aggregate all prompts for a final summary prompt
+        save_scene_prompts_json(prompts, Path(output_path).with_suffix('.scene_prompts.json'))
     synopses_text = ' '.join([p['prompt'] for p in prompts])
     print(f"[INFO] Aggregated scene prompts: {repr(synopses_text)}")
     final_prompt_input = (
@@ -368,7 +421,7 @@ def get_or_generate_prompt(call_folder, run_folder, fallback_prompt="A surreal, 
                 llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'  # Default for image
             segmentation_mode = getattr(args, 'segmentation_mode', 'time') if args else 'time'
             window_seconds = getattr(args, 'window_seconds', 30) if args else 30
-            prompt_result = run_llm_scene_based(transcript, llm_config, output_path=prompt_file, segmentation_mode=segmentation_mode, window_seconds=window_seconds)
+            prompt_result = run_llm_scene_based_token_aware(transcript, llm_config, output_path=prompt_file, window_seconds=window_seconds, max_tokens=args.max_tokens if args else 4096, model=args.llm_model if args else "gpt-3.5-turbo", prompt_type=segmentation_mode, max_chars=100)
             if prompt_result is None or prompt_result.strip() == '' or is_llm_error_prompt(prompt_result):
                 print(f"[WARN] LLM failed to generate a valid prompt for {call_id_or_name}. Using fallback.")
                 prompt = fallback_prompt
@@ -420,7 +473,7 @@ def get_or_generate_singlefile_prompt(llm_dir, run_folder, fallback_prompt="A su
                 llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'  # Default for image
             segmentation_mode = getattr(args, 'segmentation_mode', 'time') if args else 'time'
             window_seconds = getattr(args, 'window_seconds', 30) if args else 30
-            prompt_result = run_llm_scene_based(transcript, llm_config, output_path=prompt_file, segmentation_mode=segmentation_mode, window_seconds=window_seconds)
+            prompt_result = run_llm_scene_based_token_aware(transcript, llm_config, output_path=prompt_file, window_seconds=window_seconds, max_tokens=args.max_tokens if args else 4096, model=args.llm_model if args else "gpt-3.5-turbo", prompt_type=segmentation_mode, max_chars=100)
             if prompt_result is None or prompt_result.strip() == '' or is_llm_error_prompt(prompt_result):
                 print(f"[WARN] LLM failed to generate a valid prompt for single-file mode. Using fallback.")
                 prompt = fallback_prompt
@@ -466,16 +519,26 @@ def call_comfyui_api(api_url, workflow):
         raise RuntimeError(f"ComfyUI API error: {response.status_code} {response.text}")
     return response.json()
 
-def ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds):
+def ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds, force=False):
     scene_json = prompt_file.with_suffix('.scene_prompts.json')
-    if scene_json.exists():
+    if scene_json.exists() and not force:
         with open(scene_json, 'r', encoding='utf-8') as f:
             return json.load(f)
     # Generate scene prompts JSON
-    print(f"[INFO] Generating scene prompts JSON at {scene_json} ...")
-    prompts = generate_prompts_for_segments(
-        segment_transcript(transcript, mode=segmentation_mode, window_seconds=window_seconds),
-        llm_config, prompt_type='scene', max_chars=100)
+    if force and scene_json.exists():
+        print(f"[INFO] --force specified: Regenerating scene prompts JSON at {scene_json} ...")
+    else:
+        print(f"[INFO] Generating scene prompts JSON at {scene_json} ...")
+    # Use token-aware segmentation and prompt generation
+    max_tokens = getattr(args, 'max_tokens', 4096)
+    model = getattr(args, 'llm_model', None)
+    if not model:
+        model = 'gpt-3.5-turbo'
+        print(f"[INFO] No --llm-model specified, using default model for tiktoken: {model}")
+    else:
+        print(f"[INFO] Using model for tiktoken: {model}")
+    prompts = generate_prompts_for_segments_token_aware(
+        transcript, llm_config, window_seconds=window_seconds, max_tokens=max_tokens, model=model, prompt_type='scene', max_chars=100)
     if not prompts:
         print(f"[WARN] No prompts generated for scene prompts JSON at {scene_json}.")
         return None
@@ -504,22 +567,43 @@ def unload_llm_model(llm_config=None):
         print(f"[WARN] Failed to unload LLM model: {e}")
 
 def main():
+    # --- Early argument parsing for --llm-list-models ---
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument('--llm-list-models', action='store_true')
+    pre_args, _ = pre_parser.parse_known_args()
+    if pre_args.llm_list_models:
+        print("[INFO] Listing available LM Studio models (lms ls):")
+        try:
+            result = subprocess.run(["lms", "ls"], capture_output=True, text=True, check=False)
+            print(result.stdout)
+            if result.stderr:
+                print(f"[WARN] lms ls stderr: {result.stderr.strip()}")
+        except Exception as e:
+            print(f"[ERROR] Failed to list LM Studio models: {e}")
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(description="ComfyUI Image Generator Extension for The-Machine")
+    # --- CLI Argument Definitions ---
     parser.add_argument('--run-folder', type=str, required=True, help='Path to run-YYYYMMDD-HHMMSS output folder')
-    parser.add_argument('--workflow', type=str, default='extensions/ComfyUI/theMachine_SDXL_Basic.json', help='Path to ComfyUI workflow JSON')
-    parser.add_argument('--output-dir', type=str, help='Output directory for images (default: <run-folder>/comfyui_images)')
+    parser.add_argument('--workflow', type=str, default='extensions/ComfyUI/theMachine_SDXL_Basic.json', help='Path to ComfyUI workflow JSON (for video mode)')
+    parser.add_argument('--output-dir', type=str, help='Output directory for images/videos (default: <run-folder>/comfyui_images or comfyui_videos)')
     parser.add_argument('--seed', type=int, help='Random seed for generation')
-    parser.add_argument('--batch-size', type=int, default=1, help='Number of images to generate')
+    parser.add_argument('--batch-size', type=int, default=1, help='Number of images to generate (default: 1)')
     parser.add_argument('--api-url', type=str, default='http://127.0.0.1:8188', help='ComfyUI API URL')
-    parser.add_argument('--update-manifest', action='store_true', help='Update manifest.json with image metadata')
+    parser.add_argument('--update-manifest', action='store_true', help='Update manifest.json with output metadata')
     parser.add_argument('--master-transcript', type=str, help='Path to a master transcript file to use for LLM prompt generation (overrides automatic search)')
     parser.add_argument('--segmentation-mode', type=str, choices=['time', 'utterance'], default='time', help='Scene segmentation mode: time (default) or utterance')
-    parser.add_argument('--window-seconds', type=int, default=30, help='Time window size in seconds for scene segmentation (default: 30)')
+    parser.add_argument('--window-seconds', type=int, default=90, help='Time window size in seconds for scene segmentation (default: 90)')
     parser.add_argument('--llm-model', type=str, help='Override the LLM model used for prompt generation (default: auto per mode)')
     parser.add_argument('--pause-after-prompts', action='store_true', help='Pause after prompt generation to allow manual LLM unload before ComfyUI jobs')
     parser.add_argument('--video', action='store_true', help='Use video workflow and output video segments')
     parser.add_argument('--image', action='store_true', help='Use image workflow and output images')
     parser.add_argument('--image-workflow', type=str, default='extensions/ComfyUI/theMachine_SDXL_Basic.json', help='Path to ComfyUI image workflow JSON (default: theMachine_SDXL_Basic.json)')
+    parser.add_argument('--max-tokens', type=int, default=4096, help='Maximum number of tokens for segment generation (default: 4096, max: 16384, hard cap: 23000)')
+    parser.add_argument('--force', action='store_true', help='Force regeneration of all prompts and scene prompt JSONs, even if they already exist.')
+    parser.add_argument('--lms-load-model', type=str, help='Path to LM Studio model to load before running jobs (overrides workflow model).')
+    parser.add_argument('--lms-context-length', type=int, default=4096, help='Context length to use when loading LM Studio model (default: 4096).')
+    # --- End CLI Argument Definitions ---
     args = parser.parse_args()
 
     run_folder = Path(args.run_folder)
@@ -556,16 +640,26 @@ def main():
         return call_folder.name
 
     # Helper to load scene prompts JSON, generating if missing
-    def ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds):
+    def ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds, force=False):
         scene_json = prompt_file.with_suffix('.scene_prompts.json')
-        if scene_json.exists():
+        if scene_json.exists() and not force:
             with open(scene_json, 'r', encoding='utf-8') as f:
                 return json.load(f)
         # Generate scene prompts JSON
-        print(f"[INFO] Generating scene prompts JSON at {scene_json} ...")
-        prompts = generate_prompts_for_segments(
-            segment_transcript(transcript, mode=segmentation_mode, window_seconds=window_seconds),
-            llm_config, prompt_type='scene', max_chars=100)
+        if force and scene_json.exists():
+            print(f"[INFO] --force specified: Regenerating scene prompts JSON at {scene_json} ...")
+        else:
+            print(f"[INFO] Generating scene prompts JSON at {scene_json} ...")
+        # Use token-aware segmentation and prompt generation
+        max_tokens = getattr(args, 'max_tokens', 4096)
+        model = getattr(args, 'llm_model', None)
+        if not model:
+            model = 'gpt-3.5-turbo'
+            print(f"[INFO] No --llm-model specified, using default model for tiktoken: {model}")
+        else:
+            print(f"[INFO] Using model for tiktoken: {model}")
+        prompts = generate_prompts_for_segments_token_aware(
+            transcript, llm_config, window_seconds=window_seconds, max_tokens=max_tokens, model=model, prompt_type='scene', max_chars=100)
         if not prompts:
             print(f"[WARN] No prompts generated for scene prompts JSON at {scene_json}.")
             return None
@@ -605,7 +699,7 @@ def main():
                 llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'
                 segmentation_mode = getattr(args, 'segmentation_mode', 'time') if args else 'time'
                 window_seconds = getattr(args, 'window_seconds', 30) if args else 30
-                scene_prompts = ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds)
+                scene_prompts = ensure_scene_prompts_json(prompt_file, transcript, llm_config, segmentation_mode, window_seconds, force=args.force)
                 if not scene_prompts:
                     print(f"[ERROR] No scene prompts JSON found or generated for call {call_name}. Skipping.")
                     continue
@@ -648,7 +742,7 @@ def main():
                 llm_config['lm_studio_model_identifier'] = 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b'
                 segmentation_mode = getattr(args, 'segmentation_mode', 'time') if args else 'time'
                 window_seconds = getattr(args, 'window_seconds', 30) if args else 30
-                scene_prompts = ensure_scene_prompts_json(single_file_prompt, transcript, llm_config, segmentation_mode, window_seconds)
+                scene_prompts = ensure_scene_prompts_json(single_file_prompt, transcript, llm_config, segmentation_mode, window_seconds, force=args.force)
                 if not scene_prompts:
                     print(f"[ERROR] No scene prompts JSON found or generated for single-file mode. Skipping.")
                 else:
@@ -682,6 +776,14 @@ def main():
         input("[INFO] You may now unload the LLM model. Press Enter to begin ComfyUI jobs...")
     else:
         print("[INFO] Proceeding to ComfyUI job execution...")
+
+    # Optionally load LM Studio model if requested
+    if args.lms_load_model:
+        print(f"[INFO] Loading LM Studio model: {args.lms_load_model} with context length {args.lms_context_length}")
+        ok = load_lm_studio_model(path=args.lms_load_model, context_length=args.lms_context_length)
+        if not ok:
+            print(f"[ERROR] Failed to load LM Studio model {args.lms_load_model} with context length {args.lms_context_length}")
+            return
 
     # PHASE 2: Execute jobs according to mode
     if args.video and not args.image:

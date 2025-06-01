@@ -2,12 +2,17 @@ import requests
 import json
 import hashlib
 from pathlib import Path
+import subprocess
 
 # Tokenization utility for chunking
 try:
     import tiktoken
     def split_into_chunks(text, max_tokens=3500, model="gpt-3.5-turbo"):
-        enc = tiktoken.encoding_for_model(model)
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except KeyError:
+            print(f"[WARN] tiktoken: Unknown model '{model}', falling back to 'gpt-3.5-turbo' encoding.")
+            enc = tiktoken.encoding_for_model("gpt-3.5-turbo")
         tokens = enc.encode(text)
         chunks = []
         for i in range(0, len(tokens), max_tokens):
@@ -78,4 +83,70 @@ def run_llm_task(prompt, config, output_path=None, seed=None, chunking=True, sin
     final_result = '\n\n'.join(results)
     if output_path:
         Path(output_path).write_text(final_result, encoding='utf-8')
-    return final_result 
+    return final_result
+
+
+def load_lm_studio_model(path=None, context_length=4096, identifier=None, yes=True, gpu=None, ttl=None, log_level=None, host=None, port=None):
+    """
+    Load an LM Studio model with the specified context length and options using the lms CLI.
+    Returns True if successful, False otherwise.
+    """
+    cmd = ["lms", "load"]
+    if path:
+        cmd.append(str(path))
+    if context_length:
+        cmd += ["--context-length", str(context_length)]
+    if identifier:
+        cmd += ["--identifier", str(identifier)]
+    if yes:
+        cmd.append("--yes")
+    if gpu:
+        cmd += ["--gpu", str(gpu)]
+    if ttl:
+        cmd += ["--ttl", str(ttl)]
+    if log_level:
+        cmd += ["--log-level", str(log_level)]
+    if host:
+        cmd += ["--host", str(host)]
+    if port:
+        cmd += ["--port", str(port)]
+    print(f"[INFO] Loading LM Studio model with command: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        print(f"[INFO] lms load stdout: {result.stdout.strip()}")
+        if result.stderr:
+            print(f"[WARN] lms load stderr: {result.stderr.strip()}")
+        if result.returncode != 0:
+            print(f"[ERROR] lms load command exited with code {result.returncode}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to load LM Studio model: {e}")
+        return False
+
+
+def unload_lm_studio_model(identifier=None, host=None, port=None):
+    """
+    Unload an LM Studio model by identifier (or all if not specified) using the lms CLI.
+    Returns True if successful, False otherwise.
+    """
+    cmd = ["lms", "unload"]
+    if identifier:
+        cmd += ["--identifier", str(identifier)]
+    if host:
+        cmd += ["--host", str(host)]
+    if port:
+        cmd += ["--port", str(port)]
+    print(f"[INFO] Unloading LM Studio model with command: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        print(f"[INFO] lms unload stdout: {result.stdout.strip()}")
+        if result.stderr:
+            print(f"[WARN] lms unload stderr: {result.stderr.strip()}")
+        if result.returncode != 0:
+            print(f"[ERROR] lms unload command exited with code {result.returncode}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to unload LM Studio model: {e}")
+        return False 

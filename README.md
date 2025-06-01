@@ -1,10 +1,28 @@
 # The-Machine
 
+---
+
+Dedicated to Carlito Cross - RIP - [MadhouseLive](https://www.madhouselive.com/)
+
+---
+
 A privacy-focused, modular pipeline for processing phone call audio and other recordings. Automates ingestion, PII removal, file tracking, audio separation, CLAP annotation, loudness normalization, speaker diarization, transcription, soundbite extraction, LLM integration, remixing, and show creation. All steps are orchestrated for strict privacy, traceability, and manifest/logging requirements.
 
 ---
 
 **GitHub Repository:** [https://github.com/akspa0/The-Machine](https://github.com/akspa0/The-Machine)
+
+---
+
+## 🚀 Modern Architecture: Extension-Driven, API-First, Librarian-Orchestrator
+
+**The-Machine** is now built around a modular, extension-driven, API-first architecture:
+- The main program acts as a **librarian orchestrator**: it manages jobs, invokes extensions, and handles all data flow, but contains no monolithic pipeline logic.
+- All core logic is implemented as plug-and-play **extensions** ("stacks"), which are independently testable and reusable.
+- All integrations (e.g., ComfyUI) use robust API-based file transfer and job submission—never direct file system access.
+- Every job, file, and data object is uniquely identified, tracked, and privacy-preserving, with robust error handling and traceability.
+- Prompts and metadata are cached for reuse in downstream workflows, ensuring consistency and manifest traceability.
+- The system is designed for future database integration (e.g., SQLite) to manage jobs, data, and reference lookups.
 
 ---
 
@@ -123,27 +141,57 @@ The-Machine/
 
 ---
 
-## Extensions
+## Core Pipeline & Librarian Orchestrator
+- The main program (librarian) orchestrates all jobs, invokes extensions, and manages data flow.
+- All core logic is implemented as modular extensions (see below).
+- All external integrations (e.g., ComfyUI) use API-based file transfer and job submission—never direct file system access.
+- All outputs are copied into the canonical project structure with standardized naming and manifest tracking.
+- Privacy and PII removal are enforced at every stage; no PII in filenames, logs, or outputs.
+- The system is architected for future database integration for job/data/metadata management and reference lookups.
 
-You can add custom scripts to the `extensions/` folder. These scripts will be run after the main pipeline completes and can use all outputs (soundbites, transcripts, LLM results, etc.).
+---
 
-### Character Persona Builder Extension
+## Extensions System
 
-- The `character_persona_builder.py` extension generates advanced Character.AI persona definitions for each call/channel/speaker using transcripts and LLMs.
-- **Channel folders may have run-specific prefixes** (e.g., `0000-conversation`). The extension normalizes these for output and is robust to naming.
-- **For conversation-only calls:** Generates a separate persona for each detected speaker (no merging).
-- **For left/right calls:** Merges all speakers per channel and generates one persona per channel.
-- **System prompt and persona style are embedded** for best results (no external files needed).
-- **Usage example:**
-  ```sh
-  python extensions/character_persona_builder.py outputs/run-YYYYMMDD-HHMMSS --llm-config workflows/llm_tasks.json
-  ```
-- Outputs are written to `characters/<call_title or call_id>/<channel or conversation_speaker>/` with transcript, persona, and audio clips.
+Extensions are the heart of The-Machine. All new features and improvements are implemented as modular, plug-and-play scripts in the `extensions/` folder.
 
-### General Extension Best Practices
-- Extensions should be robust to folder naming and support both batch and single-file workflows.
+### How to Use Extensions
+- Place your extension scripts in the `extensions/` directory.
+- Each extension should inherit from `ExtensionBase` (see `extension_base.py`).
+- Extensions are run manually or can be invoked automatically after pipeline completion.
+- Extensions receive the root output directory as their argument and should only access finalized, anonymized outputs.
+
+#### Example: Running the Character Persona Builder Extension
+```sh
+python extensions/character_persona_builder.py outputs/run-YYYYMMDD-HHMMSS --llm-config workflows/llm_tasks.json
+```
+
+#### Example: Running the Avatar SDXL Generator Extension
+```sh
+python extensions/avatar/sdxl_avatar_generator.py \
+  --persona-manifest outputs/run-YYYYMMDD-HHMMSS/characters/persona_manifest.json \
+  --output-root outputs/run-YYYYMMDD-HHMMSS \
+  --initial-prompt "a drawing of"
+```
+
+#### Example: Running the ComfyUI Image Generator Extension
+```sh
+python extensions/comfyui_image_generator.py \
+  --run-folder outputs/run-YYYYMMDD-HHMMSS \
+  --workflow extensions/ComfyUI/theMachine_SDXL_Basic.json \
+  --image --window-seconds 90 --max-tokens 4096
+```
+
+See `extensions/README.md` and `extensions/avatar/README.md` for more details and authoring tips.
+
+### Best Practices for Extension Authors
+- Be robust to folder naming (handle run-specific prefixes, normalize for output).
 - Log only anonymized, PII-free information.
-- See `extensions/README.md` for more details and extension authoring tips.
+- Support both batch and single-file workflows.
+- Document your extension's purpose and usage.
+- Follow privacy, traceability, and idempotence rules.
+- Use the manifest and output folder structure for all data lineage.
+- Handle missing or partial data gracefully.
 
 ---
 
