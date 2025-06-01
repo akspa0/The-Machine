@@ -24,4 +24,8 @@ Tracks what works, what's next, and current status for the extension-driven, lib
 ## Current Status
 
 - The system is fully extension-driven, robust, and ready for database integration and further extension-driven development.
-- Legacy/monolithic pipeline logic is deprecated in favor of modular, API-driven extensions. 
+- Legacy/monolithic pipeline logic is deprecated in favor of modular, API-driven extensions.
+- ComfyUI node suite: all nodes implemented, requirements and README updated, but project is paused.
+- Next steps: debug and refactor `clap_segmentation_experiment.py`, explore Gradio UI for interactive use.
+- Known issues: ComfyUI integration not fully functional; segmentation experiment script not working.
+- Documentation and requirements are current for all completed work. 

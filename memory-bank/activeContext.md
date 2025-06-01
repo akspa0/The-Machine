@@ -11,6 +11,10 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Prompts, metadata, and outputs are cached and reused for downstream tasks.
 - All jobs, files, and data are uniquely identified and tracked for traceability.
 - Preparing for future database integration to manage jobs, data, and reference lookups.
+- The ComfyUI node suite is feature-complete and fully documented, but further work is paused.
+- Current focus: debugging and refining `clap_segmentation_experiment.py` for robust CLAP-based segmentation, and exploring a Gradio interface for interactive experimentation.
+- All requirements, setup, and documentation for the node suite are current and ready for future resumption.
+- Experimentation and refinement of new tools and interfaces are encouraged.
 
 ## Recent Changes
 

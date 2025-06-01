@@ -1,7 +1,6 @@
-# productContext.md
+# Product Context
 
-**Purpose:**
-Defines the user experience, value proposition, and product philosophy for The-Machine in its current extension-driven, librarian-orchestrator form.
+The product provides robust, auditable, and privacy-compliant audio processing for research and production environments. It is designed for modularity, extensibility, and ease of experimentation, enabling users to build, test, and refine audio workflows with strict privacy guarantees and manifest-based traceability.
 
 ## Why This Project Exists
 

@@ -30,6 +30,11 @@ Documents the system architecture, key technical decisions, design patterns, and
 - **Privacy-First:** No PII is ever logged or output; privacy is enforced at every stage.
 - **API-Driven:** All file and job transfers to external tools are done via robust APIs, never direct file system access.
 - **Database Integration (Planned):** All jobs, files, and metadata will be referenceable and queryable via a database registry.
+- **All nodes and scripts use manifest-based tracking for full traceability.**
+- **Batch and single-file processing are supported throughout the pipeline.**
+- **Strict privacy enforcement: no PII is ever logged or output.**
+- **Shared utilities for privacy and manifest logic are used across all tools.**
+- **Experimentation and reproducibility are core patterns, with a focus on clear documentation and extensibility.**
 
 ## Component Relationships
 

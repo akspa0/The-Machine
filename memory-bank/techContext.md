@@ -36,4 +36,16 @@ Describes the technologies, APIs, and technical context for the extension-driven
 
 ## Tech Context
 
+- Python 3.9+
+- PyTorch, torchaudio
+- Demucs, Spleeter (audio separation)
+- pyloudnorm (loudness normalization)
+- pyannote.audio (speaker diarization)
+- transformers (CLAP, ASR, etc.)
+- ComfyUI (node-based UI, currently on hold)
+- ffmpeg (system dependency)
+- Gradio (optional, for web UI)
+- Environment management: conda or pip
+- CUDA (optional, for GPU acceleration)
+
 - The system is now fully extension-driven, API-first, and ready for database-backed job/data management. 

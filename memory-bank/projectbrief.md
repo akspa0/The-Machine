@@ -9,7 +9,7 @@ The-Machine: Audio Context Librarian
 
 ## Overview
 
-The-Machine is a modular, privacy-focused audio processing system. The main program acts as a "librarian" orchestrator, managing a growing set of specialized extensions (the "stacks") for all audio, metadata, and AI-driven tasks. The system is designed for extensibility, traceability, and robust automation.
+The-Machine is a modular, privacy-first audio processing pipeline designed for robust, auditable, and privacy-compliant audio workflows. It enforces strict PII removal, manifest-based tracking, and supports both batch and single-file processing at every stage. The project includes a feature-complete ComfyUI node suite (currently on hold), and is now focusing on experimental tools such as `clap_segmentation_experiment.py` and the development of a Gradio interface for interactive experimentation.
 
 ## Core Requirements
 
