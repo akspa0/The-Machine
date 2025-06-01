@@ -1,52 +1,39 @@
 # techContext.md
 
 **Purpose:**
-Describes technologies used, development setup, technical constraints, and dependencies.
+Describes the technologies, APIs, and technical context for the extension-driven, librarian-orchestrator version of The-Machine.
 
-## Technologies Used
+## Core Technologies
 
-- Python 3.x
-- torchaudio: audio loading, resampling, and saving
-- soundfile: audio file I/O
-- numpy: array and audio processing
-- librosa: resampling and audio utilities
-- pyannote: speaker diarization
-- parakeet (HuggingFace): ASR transcription
-- OpenAI Whisper: optional ASR transcription
-- pyloudnorm: loudness normalization
-- rich: console output and tracebacks
-- tqdm: progress bars
-- requests: LLM API calls
-- mutagen: audio metadata (ID3) reading/writing and propagation
-- ComfyUI: image/video generation via API
-- Advanced LLM prompt batching and hierarchical summarization for scene-based workflows
+- **Python 3.x**: Main language for the librarian orchestrator and all extensions.
+- **API-First Integrations**: All external tools (e.g., ComfyUI) are integrated via robust HTTP APIs (e.g., /prompt, /upload/image).
+- **Modular Extensions**: All core logic is implemented as Python modules/extensions that can be independently developed, tested, and swapped.
+- **CLI/Config-Driven**: The system is orchestrated via CLI and config files for maximum flexibility and reproducibility.
+- **Database-Ready**: The architecture is designed for future integration with a database (e.g., SQLite) for job/data/metadata management and reference lookups.
 
 ## Development Setup
 
-- Install dependencies via pip (requirements.txt provided)
-- Requires access to HuggingFace models and PyPI packages
-- CLI options for ASR engine, LLM config, and call tones
-- Workflow logic and LLM tasks defined in workflows/ JSON files
-- CLI and workflow JSONs are the primary user configuration interface for both core pipeline and extensions (e.g., ComfyUI, CLAP)
+- Install dependencies via pip (requirements.txt provided).
+- Extensions are developed as standalone Python modules in the extensions/ directory.
+- All job/data transfer to external tools is done via API, not direct file system access.
+- All outputs are copied into the project structure and tracked in the manifest.
 
 ## Technical Constraints
 
-- Must handle large batches of files efficiently
-- Must ensure privacy (no PII in outputs, logs, or manifests)
-- File tracking and metadata lineage must be robust and lossless
-- All output files and logs must be auditable and extensible
+- All jobs, files, and data must be uniquely identified and tracked for traceability.
+- Privacy and PII removal must be enforced at every stage.
+- Extensions must be plug-and-play and not require changes to the core librarian.
+- The system must be ready for database integration for job/data/metadata management.
 
 ## Dependencies
 
-- parakeet-tdt-0.6b-v2 (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2)
-- audio-separator (https://pypi.org/project/audio-separator/)
-- transformers (for CLAP, https://huggingface.co/docs/transformers/model_doc/clap)
-- audiomentations (https://github.com/iver56/audiomentations)
-- mutagen (https://mutagen.readthedocs.io/en/latest/)
-- torchaudio, soundfile, numpy, librosa, pyannote, pyloudnorm, tqdm, rich, requests
+- Python 3.x
+- requests (for API calls)
+- tqdm, rich (for CLI UX)
+- pydub, numpy, soundfile, torchaudio, librosa (for audio processing in extensions)
+- ComfyUI (external, API-driven)
+- SQLite (planned, for future database registry)
 
 ## Tech Context
 
-- CLI now supports `--output-folder` for privacy-preserving resume.
-- Argument parser and main script logic refactored for clear separation of fresh vs. resume runs.
-- All resume/status/clear/force commands now operate on the output folder. 
+- The system is now fully extension-driven, API-first, and ready for database-backed job/data management. 
