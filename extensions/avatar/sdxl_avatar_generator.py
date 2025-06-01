@@ -5,6 +5,7 @@ from pathlib import Path
 import requests
 import random
 import sys
+import time
 sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
 from llm_utils import run_llm_task
 
@@ -46,26 +47,39 @@ def update_workflow_json(base_json, positive_prompt, width, height):
             node['inputs']['text'] = positive_prompt
     return wf
 
-def run_comfyui_workflow(workflow_json, output_path, api_url=None):
-    # Save workflow JSON for debugging
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(workflow_json, f, indent=2)
-    if api_url:
-        # Send to ComfyUI API
-        url = f"{api_url.rstrip('/')}/prompt"
-        headers = {'Content-Type': 'application/json'}
-        payload = {"prompt": workflow_json}
-        print(f"[INFO] Sending workflow to ComfyUI API at {url} ...")
-        try:
-            response = requests.post(url, headers=headers, data=json.dumps(payload))
-            if response.status_code != 200:
-                print(f"[ERROR] ComfyUI API error: {response.status_code} {response.text}")
-            else:
-                print(f"[INFO] ComfyUI API response: {response.json()}")
-        except Exception as e:
-            print(f"[ERROR] Failed to send workflow to ComfyUI API: {e}")
-    # Simulate output image path
-    return output_path.with_suffix('.png')
+# --- API-COMPLIANT COMFYUI UTILS ---
+def submit_comfyui_workflow(workflow_json, api_url):
+    payload = {"prompt": workflow_json}
+    resp = requests.post(f"{api_url.rstrip('/')}/prompt", json=payload)
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        print(f"[ERROR] ComfyUI API error: {resp.status_code} {resp.text}")
+        raise
+    data = resp.json()
+    prompt_id = data.get("prompt_id")
+    if not prompt_id:
+        raise RuntimeError(f"Failed to submit workflow: {data}")
+    return prompt_id
+
+def wait_for_comfyui_completion(prompt_id, api_url, timeout=120):
+    start = time.time()
+    while time.time() - start < timeout:
+        resp = requests.get(f"{api_url.rstrip('/')}/history/{prompt_id}")
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "completed":
+            return data
+        time.sleep(2)
+    raise TimeoutError("ComfyUI job did not complete in time.")
+
+def get_output_files_from_result(result, file_exts=(".png", ".webp")):
+    files = []
+    for out in result.get('outputs', []):
+        fname = out.get('filename', '')
+        if fname.lower().endswith(file_exts):
+            files.append(fname)
+    return files
 
 def score_segments_with_llm(segments, llm_config):
     prompt_template = (
@@ -120,6 +134,16 @@ SYSTEM_PROMPT = (
     "Favor creativity, absurd humor, and surreal situations in your prompt generation. "
     "Your output will be used to generate a unique, memorable, and visually striking image."
 )
+
+def run_comfyui_workflow(workflow_json, api_url):
+    prompt_id = submit_comfyui_workflow(workflow_json, api_url)
+    print(f"[INFO] Submitted workflow to ComfyUI, prompt_id: {prompt_id}")
+    result = wait_for_comfyui_completion(prompt_id, api_url)
+    print(f"[INFO] ComfyUI job completed for prompt_id: {prompt_id}")
+    output_files = get_output_files_from_result(result)
+    if not output_files:
+        print(f"[WARN] No output files found for prompt_id: {prompt_id}")
+    return output_files
 
 def main():
     parser = argparse.ArgumentParser(description='Generate SDXL persona and backdrop images for each call/persona.')
@@ -178,9 +202,12 @@ def main():
                 continue
             prompt = f"{args.initial_prompt} {transcript}\nGenerate an image of the setting or environment described, suitable as a backdrop for this call.".strip()
             wf_json = update_workflow_json(backdrop_workflow, prompt, backdrop_workflow['10']['inputs']['width'], backdrop_workflow['10']['inputs']['height'])
-            output_path = backdrops_dir / f"{call_id}_backdrop_workflow.json"
-            image_path = run_comfyui_workflow(wf_json, output_path, api_url=args.api_url)
-            backdrop_map[call_id] = str(image_path)
+            # API-compliant: submit and wait for output
+            output_files = run_comfyui_workflow(wf_json, api_url=args.api_url)
+            if output_files:
+                backdrop_map[call_id] = output_files[0]  # Use first output file
+            else:
+                print(f"[WARN] No backdrop image generated for {call_id}.")
     else:
         print("[WARN] No backdrop workflow loaded, skipping all backdrops.")
 
@@ -198,7 +225,6 @@ def main():
             persona_md = read_persona_md(entry['persona_path'])
             persona_dir = comfyui_images / call_id / speaker
             persona_dir.mkdir(parents=True, exist_ok=True)
-            output_path = persona_dir / 'persona_workflow.json'
             wf_json = update_workflow_json(avatar_workflow, '', avatar_workflow['10']['inputs']['width'], avatar_workflow['10']['inputs']['height'])
             # Insert persona_md text into node 14's text input
             if '14' in wf_json and 'inputs' in wf_json['14']:
@@ -219,8 +245,12 @@ def main():
                 print(f"[WARN] Node 13 not found in workflow JSON for {call_id} {speaker}. Skipping.")
                 continue
             wf_json = set_random_seed_in_workflow(wf_json)
-            image_path = run_comfyui_workflow(wf_json, output_path, api_url=args.api_url)
-            persona_map[f"{call_id}_{speaker}"] = str(image_path)
+            # API-compliant: submit and wait for output
+            output_files = run_comfyui_workflow(wf_json, api_url=args.api_url)
+            if output_files:
+                persona_map[f"{call_id}_{speaker}"] = output_files[0]  # Use first output file
+            else:
+                print(f"[WARN] No persona image generated for {call_id} {speaker}.")
     else:
         print("[WARN] No avatar workflow loaded, skipping all persona images.")
 
