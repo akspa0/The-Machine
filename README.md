@@ -1,5 +1,6 @@
 # The-Machine 🧠🔊
 
+Dedicated to the memory of Carlito Cross [Madhouse Live](https://madhouselive.com)
 ---
 
 **A context-driven, privacy-first, modular pipeline for understanding, transforming, and building on top of audio recordings.**
