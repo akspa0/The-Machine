@@ -1,6 +1,8 @@
 import os
 import json
 from pathlib import Path
+# If LLM chunking/tokenization is needed, import from llm_utils
+# from llm_utils import split_into_chunks_advanced
 
 class ExtensionBase:
     """

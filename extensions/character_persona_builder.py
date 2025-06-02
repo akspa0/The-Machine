@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from llm_tokenize import split_text_to_token_chunks
 from llm_summarize import summarize_chunks_with_llm
+from llm_utils import split_into_chunks_advanced, recursive_summarize, default_llm_summarize_fn
 
 """
 Usage:
@@ -192,14 +193,22 @@ class CharacterPersonaBuilder(ExtensionBase):
     def generate_persona(self, persona_input):
         # If input is too long, chunk and summarize
         # Always use a tiktoken-supported encoding for chunking
-        chunks = split_text_to_token_chunks(persona_input, max_tokens=self.max_tokens, model='gpt-3.5-turbo')
+        chunks = split_into_chunks_advanced(persona_input, max_tokens=self.max_tokens, model='gpt-3.5-turbo')
         responses = []
         for chunk in chunks:
             response = run_llm_task(chunk, self.llm_config, single_output=True, chunking=False)
             responses.append(response.strip())
         if len(responses) > 1:
-            summary = summarize_chunks_with_llm(responses, self.llm_config)
-            return summary
+            # Use recursive_summarize for long persona inputs
+            summary_chunks = recursive_summarize(
+                persona_input,
+                default_llm_summarize_fn,
+                max_chunks=8,
+                chunk_size=self.max_tokens,
+                model='gpt-3.5-turbo',
+                llm_config=self.llm_config
+            )
+            return '\n\n'.join(summary_chunks)
         else:
             return responses[0]
 
