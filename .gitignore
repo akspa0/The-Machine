@@ -175,3 +175,4 @@ cython_debug/
 
 # Project outputs
 outputs/
+extensions/character_ai_description_builder_v2.py
