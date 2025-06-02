@@ -7,7 +7,7 @@ import random
 import sys
 import time
 sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
-from llm_utils import run_llm_task
+from llm_utils import run_llm_task, split_into_chunks_advanced
 
 # --- UTILS ---
 def aggregate_transcript(speakers_root, call_id, channel_preference):
@@ -105,21 +105,34 @@ def check_llm_api_available(llm_config, timeout=5):
         return False
 
 def generate_llm_prompt_for_persona(persona_md, llm_config):
+    """
+    Generate a visually rich, detailed SDXL image prompt for the given persona description.
+    If the persona_md is long (>2048 tokens), chunk it and aggregate LLM responses.
+    """
     prompt_template = (
         "Generate a visually rich, detailed SDXL image prompt for the following persona description. Focus on unique visual details, mood, and style.\n\nPersona:\n{persona}\n\nPrompt:"
     )
-    prompt = prompt_template.format(persona=persona_md)
+    # Token-aware chunking for long persona descriptions
+    chunks = split_into_chunks_advanced(persona_md, max_tokens=2048, model=llm_config.get('lm_studio_model_identifier', 'gpt-3.5-turbo'))
     llm_available = check_llm_api_available(llm_config)
+    responses = []
     if llm_available:
         try:
-            llm_output = run_llm_task(prompt, llm_config, single_output=True, chunking=False)
-            return llm_output.strip()
+            for chunk in chunks:
+                prompt = prompt_template.format(persona=chunk)
+                llm_output = run_llm_task(prompt, llm_config, single_output=True, chunking=False)
+                responses.append(llm_output.strip())
+            # Aggregate responses if chunked
+            if len(responses) > 1:
+                return '\n'.join(responses)
+            else:
+                return responses[0]
         except Exception as e:
             print(f"[WARN] LLM API call failed: {e}. Using fallback prompt.")
-            return prompt
+            return prompt_template.format(persona=persona_md)
     else:
         print("[WARN] LLM API not available. Using fallback prompt.")
-        return prompt
+        return prompt_template.format(persona=persona_md)
 
 def set_random_seed_in_workflow(wf_json):
     for node in wf_json.values():
