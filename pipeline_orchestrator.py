@@ -849,6 +849,17 @@ class PipelineOrchestrator:
             if master_transcript.exists():
                 with open(master_transcript, 'r', encoding='utf-8') as f:
                     transcript_text = f.read()
+            # --- LLM chunking for long transcripts ---
+            from extensions import llm_chunker
+            token_count = estimate_tokens(transcript_text)
+            if token_count > 2048:
+                self.log_event('INFO', 'llm_chunking_applied', {
+                    'call_id': call_id,
+                    'original_token_count': token_count,
+                    'chunk_size': 2000
+                })
+                chunks = llm_chunker.split_into_chunks(transcript_text, max_tokens=2000)
+                transcript_text = '\n\n'.join(chunks)
             call_llm_dir = llm_dir / call_id
             call_llm_dir.mkdir(parents=True, exist_ok=True)
             if mode == 'call':
