@@ -13,6 +13,7 @@ Tracks what works, what's next, and current status for the extension-driven, lib
 - Privacy and PII removal are enforced at every stage.
 - Canonical output copying: all outputs are copied from external tools into the project structure with standardized naming and manifest tracking.
 - The system is ready for future database integration (e.g., SQLite) for job/data/metadata management.
+- **New:** Audio file validation now uses duration (≥10s) instead of file size, with pre-processing and logging of file validity. Single-file input metadata is transferred to output soundbites during finalization.
 
 ## What's Next
 
@@ -20,6 +21,7 @@ Tracks what works, what's next, and current status for the extension-driven, lib
 - Design and prototype a database-backed registry for jobs, files, and metadata.
 - Continue to improve traceability, privacy, and automation in all extensions.
 - Update documentation and memory bank as the extension ecosystem evolves.
+- **Next:** Enforce duration-based validation (≥10s) for all audio files before separation, log file validity after renaming, and ensure metadata transfer from single-file inputs to output soundbites.
 
 ## Current Status
 

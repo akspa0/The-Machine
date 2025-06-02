@@ -616,4 +616,17 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                     # Retrieve start/end time for the soundbite (if available)
                     start_time = start
                     end_time = end
-                    embed_lineage_id3(mp3_path, original_title, start_time, end_time) 
+                    embed_lineage_id3(mp3_path, original_title, start_time, end_time)
+                    # When writing out final soundbites, if the input was a single-file, transfer metadata (e.g., original artist) to the output soundbites using the 'comments' or 'composer' field. Use mutagen or similar library to write metadata tags to the output files. Ensure this is done for all output soundbites generated from single-file inputs.
+                    if wav_file.name.endswith(('.wav', '.mp3')):
+                        if 'artist' in locals():
+                            mp3_path.tags['artist'] = [artist]
+                        if 'album' in locals():
+                            mp3_path.tags['album'] = [album]
+                        if 'title' in locals():
+                            mp3_path.tags['title'] = [title]
+                        if 'comment' in locals():
+                            mp3_path.tags['comment'] = [comment]
+                        if 'composer' in locals():
+                            mp3_path.tags['composer'] = [composer]
+                        mp3_path.save() 

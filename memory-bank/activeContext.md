@@ -11,6 +11,7 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Prompts, metadata, and outputs are cached and reused for downstream tasks.
 - All jobs, files, and data are uniquely identified and tracked for traceability.
 - Preparing for future database integration to manage jobs, data, and reference lookups.
+- **New:** Audio file validation is now based on duration (≥10s) rather than file size, to ensure only valid files are processed for separation. Pre-processing after renaming logs all files, their durations, and validity status. Single-file input metadata is now transferred to output soundbites during finalization.
 
 ## Recent Changes
 
@@ -25,6 +26,7 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Design and prototype a database-backed registry for jobs, files, and metadata (e.g., SQLite).
 - Continue to improve traceability, privacy, and automation in all extensions.
 - Update documentation and memory bank as the extension ecosystem evolves.
+- **Next:** Implement duration-based validation (≥10s) for all audio files before separation, log file validity after renaming, and ensure metadata transfer from single-file inputs to output soundbites.
 
 ## Active Decisions & Considerations
 

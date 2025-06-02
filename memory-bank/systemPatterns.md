@@ -30,6 +30,7 @@ Documents the system architecture, key technical decisions, design patterns, and
 - **Privacy-First:** No PII is ever logged or output; privacy is enforced at every stage.
 - **API-Driven:** All file and job transfers to external tools are done via robust APIs, never direct file system access.
 - **Database Integration (Planned):** All jobs, files, and metadata will be referenceable and queryable via a database registry.
+- **New:** Audio file validation is performed by duration (≥10s) before separation, with pre-processing and logging of file validity. Metadata from single-file inputs is transferred to output soundbites during finalization.
 
 ## Component Relationships
 

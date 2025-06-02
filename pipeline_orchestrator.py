@@ -156,26 +156,28 @@ class PipelineOrchestrator:
         # Handle single files (complete conversations) - skip separation, prepare for diarization
         for file in renamed_dir.iterdir():
             if file.is_file() and not ('-left-' in file.name or '-right-' in file.name):
-                # This is a complete conversation file - skip separation
+                duration = file_durations.get(file.name)
+                if duration is None or duration < 10.0:
+                    self.log_event('INFO', 'file_skipped_too_short', {
+                        'input_name': file.name,
+                        'duration': duration,
+                        'message': 'File skipped for diarization: <10s duration or unreadable'
+                    })
+                    continue
+                if file.name.startswith('out-'):
+                    self.log_event('INFO', 'file_skipped_out_prefix', {
+                        'input_name': file.name,
+                        'message': "File skipped for diarization: starts with 'out-'"
+                    })
+                    continue
                 single_file_count += 1
-                
-                # Extract call_id from filename (the index part)
-                call_id = file.stem.split('-')[0]  # e.g., "0000" from "0000-out-20241227-001220"
-                
-                # Create separated directory structure (even though we're not separating)
+                call_id = file.stem.split('-')[0]
                 separated_dir = self.run_folder / 'separated' / call_id
                 separated_dir.mkdir(parents=True, exist_ok=True)
-                
-                # Copy as complete conversation file for diarization
                 conversation_file = separated_dir / f"{call_id}-conversation.wav"
-                
-                # Convert to WAV if needed and copy
-                import soundfile as sf
                 try:
-                    # Read and convert to WAV
                     audio, sr = sf.read(str(file))
                     sf.write(str(conversation_file), audio, sr)
-                    
                     self.log_event('INFO', 'single_file_ready_for_diarization', {
                         'input_file': str(file),
                         'output_file': str(conversation_file),
