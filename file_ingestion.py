@@ -10,6 +10,8 @@ from rich.traceback import install as rich_traceback_install
 import argparse
 import re
 import unicodedata
+# If LLM chunking/tokenization is needed, import from llm_utils
+# from llm_utils import split_into_chunks_advanced
 
 # Install rich traceback for better error output
 rich_traceback_install()

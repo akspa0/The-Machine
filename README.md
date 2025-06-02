@@ -198,3 +198,9 @@ See `extensions/README.md` and `extensions/avatar/README.md` for more details an
 ## Configuration
 - **CLAP segmentation/annotation:** Now handled exclusively by the extension (`clap_segmentation_experiment.py`). You may still configure prompts and thresholds in `workflows/clap_segmentation.json` and `workflows/clap_annotation.json` for use by the extension.
 - **LLM tasks:** `
+
+## LLM Utilities
+
+All LLM chunking, tokenization, and summarization logic is now unified in `extensions/llm_utils.py`.
+- Use `python extensions/llm_utils.py --help` for CLI usage (chunking, summarization, recursive summarization).
+- All extensions and pipeline stages import from `llm_utils.py` for these features.

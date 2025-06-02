@@ -3,6 +3,8 @@ import functools
 from pathlib import Path
 from typing import Callable, Any, Optional, List, Dict
 from pipeline_state import PipelineState, get_pipeline_stages
+# If LLM chunking/tokenization is needed, import from llm_utils
+# from llm_utils import split_into_chunks_advanced
 
 
 def with_resume_support(stage_name: str, pipeline_state: Optional[PipelineState] = None):
