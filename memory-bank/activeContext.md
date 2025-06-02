@@ -6,6 +6,8 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 ## Current Focus
 
 - Ensuring robust, unified audio processing for both single-file and batch/call workflows.
+- Supporting advanced LLM chunking, tokenization, and summarization for both per-speaker and entire-file outputs.
+- Improving user feedback and progress reporting, especially for GPU-accelerated stages like separation.
 - Maintaining strict privacy, traceability, and manifest requirements.
 - Supporting modular extension-driven architecture.
 - The main program (librarian) orchestrates all jobs and data flow, invoking extensions as needed.
@@ -30,6 +32,8 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - The canonical entry point for all workflows is now `main.py` (do not use `pipeline_orchestrator.py` directly).
 - README and user instructions updated to reflect this change.
 - Resume, force, and extension system remain robust and tested.
+- LLM handling logic is being enhanced to use chunking/tokenization/summarization (see extensions/llm_tokenize.py and llm_summarize.py).
+- Multiple project resets/rebuilds have led to a stable, extensible pipeline.
 
 ## Next Steps
 
@@ -41,6 +45,9 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Design and prototype a database-backed registry for jobs, files, and metadata (e.g., SQLite).
 - Continue to improve traceability, privacy, and automation in all extensions.
 - Update documentation and memory bank as the extension ecosystem evolves.
+- Integrate advanced LLM chunking/caching for large transcripts.
+- Improve progress reporting for all sub-tasks, especially GPU-accelerated ones.
+- Continue refining user experience and extension compatibility.
 
 ## Active Decisions & Considerations
 

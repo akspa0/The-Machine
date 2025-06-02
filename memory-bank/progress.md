@@ -7,6 +7,10 @@ Tracks what works, what's next, and current status for the extension-driven, lib
 - Segment/soundbite bug is fixed: all diarized/segmented utterances are now transcribed and output as soundbites in both single-file and batch workflows.
 - main.py is now the canonical entry point for all workflows.
 - Output structure and manifest logic are unified and robust.
+- LLM chunking/tokenization/summarization logic (from extensions/llm_tokenize.py and llm_summarize.py) is being integrated for both per-speaker and entire-file outputs.
+- Progress reporting for separation and other GPU-accelerated stages is a priority for user feedback.
+- Resume, debug, and manifest/logging are robust and user-friendly.
+- Project is stable after multiple resets/rebuilds.
 
 ## What Works
 
@@ -58,4 +62,7 @@ Tracks what works, what's next, and current status for the extension-driven, lib
 ## Known Issues
 
 - Continue to test edge cases and extension compatibility.
-- Monitor for any new issues as extensions and workflows evolve. 
+- Monitor for any new issues as extensions and workflows evolve.
+- Integrate advanced LLM chunking/caching for large transcripts.
+- Improve progress reporting for all sub-tasks, especially GPU-accelerated ones.
+- Continue refining user experience and extension compatibility. 

@@ -46,6 +46,16 @@ def run_orchestrator(args, input_dir, output_folder):
         cmd.append('--resume')
     if args.resume_from:
         cmd += ['--resume-from', args.resume_from]
+    if args.force:
+        cmd.append('--force')
+    if args.force_rerun:
+        cmd += ['--force-rerun', args.force_rerun]
+    if args.clear_from:
+        cmd += ['--clear-from', args.clear_from]
+    if args.stage_status:
+        cmd += ['--stage-status', args.stage_status]
+    if args.show_resume_status:
+        cmd.append('--show-resume-status')
     if args.asr_engine:
         cmd += ['--asr_engine', args.asr_engine]
     if args.llm_config:
@@ -65,6 +75,20 @@ def run_single_file_orchestrator(args, file_path, output_folder):
     cmd = [sys.executable, 'single_file_orchestrator.py', file_path]
     if args.asr_engine:
         cmd += ['--asr_engine', args.asr_engine]
+    if args.resume:
+        cmd.append('--resume')
+    if args.resume_from:
+        cmd += ['--resume-from', args.resume_from]
+    if args.force:
+        cmd.append('--force')
+    if args.force_rerun:
+        cmd += ['--force-rerun', args.force_rerun]
+    if args.clear_from:
+        cmd += ['--clear-from', args.clear_from]
+    if args.stage_status:
+        cmd += ['--stage-status', args.stage_status]
+    if args.show_resume_status:
+        cmd.append('--show-resume-status')
     logging.info(f"[main.py] Running single_file_orchestrator: {' '.join(map(str, cmd))}")
     result = subprocess.run(cmd)
     if result.returncode != 0:
@@ -100,11 +124,22 @@ def main():
     # Orchestrator passthrough args
     parser.add_argument('--resume', action='store_true', help='Enable resume functionality')
     parser.add_argument('--resume-from', type=str, help='Resume from a specific stage')
+    parser.add_argument('--force', action='store_true', help='When used with --resume-from, deletes all outputs and state from that stage forward for a clean re-run')
+    parser.add_argument('--force-rerun', type=str, metavar='STAGE', help='Force re-run a specific stage even if marked complete')
+    parser.add_argument('--clear-from', type=str, metavar='STAGE', help='Clear completion status from specified stage onwards')
+    parser.add_argument('--stage-status', type=str, metavar='STAGE', help='Show detailed status for a specific stage')
+    parser.add_argument('--show-resume-status', action='store_true', help='Show current resume status and exit')
     parser.add_argument('--asr_engine', type=str, help='ASR engine to use')
     parser.add_argument('--llm_config', type=str, help='Path to LLM config')
     parser.add_argument('--call-tones', action='store_true', help='Append tones.wav to calls')
     parser.add_argument('--call-cutter', action='store_true', help='Enable CLAP-based call segmentation')
     args = parser.parse_args()
+
+    # --- Argument validation for resume/new run distinction ---
+    is_resume = args.output_folder and (args.resume or args.resume_from or args.force)
+    if not is_resume and not (args.input_dir or getattr(args, 'file', None) or getattr(args, 'url', None)):
+        print("ERROR: Must provide either --input-dir, --file, or --url for a new run. For resume, use --output-folder with --resume, --resume-from, or --force.")
+        exit(1)
 
     setup_logging(args.output_folder)
 

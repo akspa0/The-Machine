@@ -46,5 +46,7 @@ Documents the system architecture, key technical decisions, design patterns, and
 
 - The canonical entry point for all workflows is now `main.py`. All orchestration, job management, and extension invocation should be launched from this script.
 - The orchestrator and extension system are designed to support both batch/call and single-file workflows with a unified output structure.
-- Recent bugfixes ensure that all diarized/segmented utterances are processed and output as soundbites, with correct transcript association and manifest tracking.
+- LLM handling must support both per-speaker and entire-file outputs, using chunking/tokenization/summarization logic (see extensions/llm_tokenize.py and llm_summarize.py).
+- Progress reporting for all sub-tasks, especially GPU-accelerated ones, is a key UX pattern for user feedback.
+- Resume, debug, and manifest/logging are robust and user-friendly, supporting frequent resets and rapid iteration.
 - All outputs, logs, and manifests are strictly PII-free and fully auditable. 

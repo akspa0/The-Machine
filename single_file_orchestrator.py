@@ -612,6 +612,9 @@ class PipelineOrchestrator:
         soundbites_dir = self.run_folder / 'soundbites'
         soundbites_dir.mkdir(exist_ok=True)
         segments = [entry for entry in self.manifest if entry.get('stage') == 'speaker_segmented']
+        # Detect single-file workflow (only one call_id in speakers/)
+        call_ids = [d.name for d in speakers_dir.iterdir() if d.is_dir()]
+        is_single_file = len(call_ids) == 1 and call_ids[0] == '0000'
         # Process each segment independently
         master_soundbites = []
         for seg in segments:
@@ -626,13 +629,11 @@ class PipelineOrchestrator:
             if not channel:
                 self.log_event('WARNING', 'channel_missing', {'idx': idx, 'speaker': speaker})
                 continue
-            # Use call_id for the top-level directory, not idx
             call_id = seg.get('call_id', '0000')
             spk_dir = speakers_dir / call_id / channel / speaker
             if not spk_dir.exists():
                 self.log_event('WARNING', 'speaker_dir_missing', {'spk_dir': str(spk_dir), 'idx': idx, 'channel': channel, 'speaker': speaker})
                 continue
-            # Use the full unique base filename for this segment
             wav_path = seg.get('wav')
             if not wav_path:
                 self.log_event('WARNING', 'wav_path_missing', {'seg': seg})
@@ -641,15 +642,20 @@ class PipelineOrchestrator:
             orig_wav = spk_dir / (base_name + '.wav')
             orig_txt = spk_dir / (base_name + '.txt')
             orig_json = spk_dir / (base_name + '.json')
-            out_dir = soundbites_dir / f"{idx:04d}" / channel / speaker
-            out_dir.mkdir(parents=True, exist_ok=True)
-            # --- FIX: transcript lookup and check ---
+            # --- transcript lookup and check ---
             transcript_entry = next((e for e in self.manifest if e.get('stage') == 'soundbite_valid' and e.get('index') == idx and e.get('speaker') == speaker and e.get('channel') == channel), None)
             transcript = transcript_entry.get('text') if transcript_entry and transcript_entry.get('text') else None
             if not transcript or not transcript.strip():
                 continue
-            # --- END FIX ---
-            out_base = f"{idx:04d}-{self.sanitize(transcript)}"
+            # --- END transcript lookup ---
+            # For single-file workflow, flatten output structure
+            if is_single_file:
+                out_dir = soundbites_dir
+                out_base = f"{idx:04d}-{self.sanitize(transcript)}"
+            else:
+                out_dir = soundbites_dir / f"{idx:04d}" / channel / speaker
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_base = f"{idx:04d}-{self.sanitize(transcript)}"
             out_wav = out_dir / (out_base + '.wav')
             out_txt = out_dir / (out_base + '.txt') if orig_txt.exists() else None
             out_json = out_dir / (out_base + '.json') if orig_json.exists() else None
@@ -1312,7 +1318,7 @@ class PipelineOrchestrator:
 
     def run_normalization_stage(self):
         """
-        Normalize separated vocal stems to -14.0 LUFS and output to normalized/<call id>/<channel>.wav.
+        Normalize separated vocal stems to -14.0 LUFS and output to normalized/<index>/<stem_type>.wav.
         Downstream stages use normalized vocals.
         Logs every file written and updates manifest.
         """
@@ -1324,17 +1330,16 @@ class PipelineOrchestrator:
         normalized_dir.mkdir(exist_ok=True)
         meter = pyln.Meter(44100)
         self.log_event('INFO', 'normalization_start', {'dir': str(separated_dir)})
-        for call_id in os.listdir(separated_dir):
-            call_sep_dir = separated_dir / call_id
+        for idx in os.listdir(separated_dir):
+            call_sep_dir = separated_dir / idx
             if not call_sep_dir.is_dir():
                 continue
-            call_norm_dir = normalized_dir / call_id
+            call_norm_dir = normalized_dir / idx
             call_norm_dir.mkdir(parents=True, exist_ok=True)
-            for channel in ['left-vocals', 'right-vocals']:
-                src = call_sep_dir / f"{channel}.wav"
-                if not src.exists():
-                    continue
+            for wav_file in call_sep_dir.glob('*.wav'):
+                src = wav_file
                 audio, sr = sf.read(str(src))
+                # Always convert to mono for normalization
                 if audio.ndim > 1:
                     audio = audio.mean(axis=1)
                 if sr != 44100:
@@ -1343,11 +1348,11 @@ class PipelineOrchestrator:
                     sr = 44100
                 loudness = meter.integrated_loudness(audio)
                 audio_norm = pyln.normalize.loudness(audio, loudness, -14.0)
-                out_path = call_norm_dir / f"{channel}.wav"
+                out_path = call_norm_dir / wav_file.name
                 sf.write(str(out_path), audio_norm, sr)
                 self.log_and_manifest(
                     stage='normalized',
-                    call_id=call_id,
+                    call_id=idx,
                     input_files=[str(src)],
                     output_files=[str(out_path)],
                     params={'target_lufs': -14.0},
@@ -1360,67 +1365,43 @@ class PipelineOrchestrator:
     def run_true_peak_normalization_stage(self):
         """
         Apply true peak normalization to prevent digital clipping on normalized vocals.
-        Uses -1.0 dBTP (decibels True Peak) limit which is broadcast standard.
+        Uses -6.0 dBTP (decibels True Peak) limit which is broadcast standard.
         Logs every file written and updates manifest.
         """
         import pyloudnorm as pyln
         import soundfile as sf
         from pathlib import Path
-        
         normalized_dir = self.run_folder / 'normalized'
         true_peak_dir = self.run_folder / 'true_peak_normalized'
         true_peak_dir.mkdir(exist_ok=True)
-        
-        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -1.0})
-        
-        for call_id in os.listdir(normalized_dir):
-            call_norm_dir = normalized_dir / call_id
+        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -6.0})
+        for idx in os.listdir(normalized_dir):
+            call_norm_dir = normalized_dir / idx
             if not call_norm_dir.is_dir():
                 continue
-            
-            call_tp_dir = true_peak_dir / call_id
+            call_tp_dir = true_peak_dir / idx
             call_tp_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Process all vocal files (both traditional and conversation)
-            for vocal_file in call_norm_dir.glob('*.wav'):
-                src = vocal_file
-                dst = call_tp_dir / vocal_file.name
-                
-                try:
-                    audio, sr = sf.read(str(src))
-                    
-                    # Ensure mono for processing
-                    if audio.ndim > 1:
-                        audio = audio.mean(axis=1)
-                    
-                    # Apply true peak limiting to -1.0 dBTP
-                    meter = pyln.Meter(sr)
-                    peak_normalized = pyln.normalize.peak(audio, -1.0)
-                    
-                    # Save the true peak normalized audio
-                    sf.write(str(dst), peak_normalized, sr)
-                    
-                    # Calculate true peak level for logging
-                    true_peak_db = 20 * np.log10(np.max(np.abs(peak_normalized)))
-                    
-                    self.log_and_manifest(
-                        stage='true_peak_normalized',
-                        call_id=call_id,
-                        input_files=[str(src)],
-                        output_files=[str(dst)],
-                        params={'target_dbtp': -1.0},
-                        metadata={'measured_true_peak_db': true_peak_db},
-                        event='file_written',
-                        result='success'
-                    )
-                    
-                except Exception as e:
-                    self.log_event('ERROR', 'true_peak_normalization_failed', {
-                        'call_id': call_id,
-                        'file': vocal_file.name,
-                        'error': str(e)
-                    })
-        
+            for wav_file in call_norm_dir.glob('*.wav'):
+                src = wav_file
+                audio, sr = sf.read(str(src))
+                # Always convert to mono for true peak normalization
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+                # Apply true peak limiting to -6.0 dBTP
+                meter = pyln.Meter(sr)
+                peak_normalized = pyln.normalize.peak(audio, -6.0)
+                sf.write(str(call_tp_dir / wav_file.name), peak_normalized, sr)
+                true_peak_db = 20 * np.log10(np.max(np.abs(peak_normalized)))
+                self.log_and_manifest(
+                    stage='true_peak_normalized',
+                    call_id=idx,
+                    input_files=[str(src)],
+                    output_files=[str(call_tp_dir / wav_file.name)],
+                    params={'target_dbtp': -6.0},
+                    metadata={'measured_true_peak_db': true_peak_db},
+                    event='file_written',
+                    result='success'
+                )
         self.log_event('INFO', 'true_peak_normalization_complete', {'true_peak_dir': str(true_peak_dir)})
 
     def run_remix_stage(self, call_tones=False):
@@ -1437,6 +1418,9 @@ class PipelineOrchestrator:
         vocals_dir = true_peak_dir if true_peak_dir.exists() else normalized_dir
         remix_dir = self.run_folder / 'remix'
         remix_dir.mkdir(exist_ok=True)
+        # --- Directory existence check ---
+        if not vocals_dir.exists():
+            raise FileNotFoundError(f"Required input directory '{vocals_dir}' not found. You must resume from an earlier stage (e.g., normalization) or re-run the pipeline with --force.")
         self.log_event('INFO', 'remix_start', {
             'vocals_source': 'true_peak_normalized' if vocals_dir == true_peak_dir else 'normalized',
             'vocals_dir': str(vocals_dir)

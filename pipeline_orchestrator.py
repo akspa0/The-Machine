@@ -1390,11 +1390,10 @@ class PipelineOrchestrator:
                 continue
             call_norm_dir = normalized_dir / call_id
             call_norm_dir.mkdir(parents=True, exist_ok=True)
-            for channel in ['left-vocals', 'right-vocals']:
-                src = call_sep_dir / f"{channel}.wav"
-                if not src.exists():
-                    continue
+            for wav_file in call_sep_dir.glob('*.wav'):
+                src = wav_file
                 audio, sr = sf.read(str(src))
+                # Always convert to mono for normalization
                 if audio.ndim > 1:
                     audio = audio.mean(axis=1)
                 if sr != 44100:
@@ -1403,7 +1402,7 @@ class PipelineOrchestrator:
                     sr = 44100
                 loudness = meter.integrated_loudness(audio)
                 audio_norm = pyln.normalize.loudness(audio, loudness, -14.0)
-                out_path = call_norm_dir / f"{channel}.wav"
+                out_path = call_norm_dir / wav_file.name
                 sf.write(str(out_path), audio_norm, sr)
                 self.log_and_manifest(
                     stage='normalized',
@@ -1420,67 +1419,43 @@ class PipelineOrchestrator:
     def run_true_peak_normalization_stage(self):
         """
         Apply true peak normalization to prevent digital clipping on normalized vocals.
-        Uses -1.0 dBTP (decibels True Peak) limit which is broadcast standard.
+        Uses -6.0 dBTP (decibels True Peak) limit which is broadcast standard.
         Logs every file written and updates manifest.
         """
         import pyloudnorm as pyln
         import soundfile as sf
         from pathlib import Path
-        
         normalized_dir = self.run_folder / 'normalized'
         true_peak_dir = self.run_folder / 'true_peak_normalized'
         true_peak_dir.mkdir(exist_ok=True)
-        
-        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -1.0})
-        
+        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -6.0})
         for call_id in os.listdir(normalized_dir):
             call_norm_dir = normalized_dir / call_id
             if not call_norm_dir.is_dir():
                 continue
-            
             call_tp_dir = true_peak_dir / call_id
             call_tp_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Process all vocal files (both traditional and conversation)
-            for vocal_file in call_norm_dir.glob('*.wav'):
-                src = vocal_file
-                dst = call_tp_dir / vocal_file.name
-                
-                try:
-                    audio, sr = sf.read(str(src))
-                    
-                    # Ensure mono for processing
-                    if audio.ndim > 1:
-                        audio = audio.mean(axis=1)
-                    
-                    # Apply true peak limiting to -1.0 dBTP
-                    meter = pyln.Meter(sr)
-                    peak_normalized = pyln.normalize.peak(audio, -1.0)
-                    
-                    # Save the true peak normalized audio
-                    sf.write(str(dst), peak_normalized, sr)
-                    
-                    # Calculate true peak level for logging
-                    true_peak_db = 20 * np.log10(np.max(np.abs(peak_normalized)))
-                    
-                    self.log_and_manifest(
-                        stage='true_peak_normalized',
-                        call_id=call_id,
-                        input_files=[str(src)],
-                        output_files=[str(dst)],
-                        params={'target_dbtp': -1.0},
-                        metadata={'measured_true_peak_db': true_peak_db},
-                        event='file_written',
-                        result='success'
-                    )
-                    
-                except Exception as e:
-                    self.log_event('ERROR', 'true_peak_normalization_failed', {
-                        'call_id': call_id,
-                        'file': vocal_file.name,
-                        'error': str(e)
-                    })
-        
+            for wav_file in call_norm_dir.glob('*.wav'):
+                src = wav_file
+                audio, sr = sf.read(str(src))
+                # Always convert to mono for true peak normalization
+                if audio.ndim > 1:
+                    audio = audio.mean(axis=1)
+                # Apply true peak limiting to -6.0 dBTP
+                meter = pyln.Meter(sr)
+                peak_normalized = pyln.normalize.peak(audio, -6.0)
+                sf.write(str(call_tp_dir / wav_file.name), peak_normalized, sr)
+                true_peak_db = 20 * np.log10(np.max(np.abs(peak_normalized)))
+                self.log_and_manifest(
+                    stage='true_peak_normalized',
+                    call_id=call_id,
+                    input_files=[str(src)],
+                    output_files=[str(call_tp_dir / wav_file.name)],
+                    params={'target_dbtp': -6.0},
+                    metadata={'measured_true_peak_db': true_peak_db},
+                    event='file_written',
+                    result='success'
+                )
         self.log_event('INFO', 'true_peak_normalization_complete', {'true_peak_dir': str(true_peak_dir)})
 
     def run_remix_stage(self, call_tones=False):
