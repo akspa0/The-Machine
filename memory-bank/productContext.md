@@ -28,4 +28,10 @@ The product provides robust, auditable, and privacy-compliant audio processing f
 
 ## 2025-XX-XX: User Experience Milestone
 - The system is modular, robust, and ready for extension-driven research and production use.
-- The user experience is focused on automation, traceability, and extensibility, with a clear path to database-backed job/data management. 
+- The user experience is focused on automation, traceability, and extensibility, with a clear path to database-backed job/data management.
+
+- The user experience is now unified for both single-file and batch/call workflows.
+- Users launch all workflows via `main.py`, which handles all orchestration, job management, and extension invocation.
+- All outputs are consistent, privacy-preserving, and compatible with downstream extensions.
+- Recent fixes ensure that all diarized/segmented utterances are processed, transcribed, and included in the outputs and master transcript.
+- Documentation and examples have been updated to reflect these improvements. 

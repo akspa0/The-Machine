@@ -35,7 +35,7 @@ def wav_to_mp3_youtube_style(wav_path, mp3_path, bitrate='192k'):
         # 1. Dynamic range compression (moderate ratio for broadcast)
         'acompressor=ratio=3:threshold=-18dB:attack=5:release=50:makeup=2dB,'
         # 2. Loudness normalization to -14 LUFS (YouTube standard)
-        'loudnorm=I=-14:TP=-1.0:LRA=7:measured_I=-14:measured_LRA=7:measured_TP=-1.0:measured_thresh=-24,'
+        'loudnorm=I=-14:TP=-6.0:LRA=7:measured_I=-14:measured_LRA=7:measured_TP=-1.0:measured_thresh=-24,'
         # 3. High-frequency clarity boost (subtle)
         'highpass=f=80,treble=g=1.5:f=8000,'
         # 4. Final true peak limiter
@@ -107,23 +107,52 @@ def run_finalization_stage(run_folder: Path, manifest: list):
     show_dir.mkdir(parents=True, exist_ok=True)
     soundbites_dir.mkdir(parents=True, exist_ok=True)
     llm_dir = run_folder / 'llm'
+    call_dir = Path(run_folder) / 'call'
+    remix_dir = Path(run_folder) / 'remix'
+    # Prefer 'call' if it exists, else use 'remix'
+    if call_dir.exists():
+        source_dir = call_dir
+    elif remix_dir.exists():
+        print("[INFO] 'call/' directory not found, using 'remix/' directory for remixed files.")
+        source_dir = remix_dir
+    else:
+        print("[ERROR] Neither 'call/' nor 'remix/' directory found. Cannot finalize outputs.")
+        return
     # --- 1. Calls ---
     call_entries = [e for e in manifest if e.get('stage') == 'remix']
     # Fallback: if no remix entries, scan call/ for remixed_call.wav files
     if not call_entries:
         call_dir = run_folder / 'call'
-        print("[WARN] No remix entries found in manifest; scanning call/ directory for remixed calls.")
-        for call_folder in call_dir.iterdir():
-            if not call_folder.is_dir():
-                continue
-            remixed_wav = call_folder / 'remixed_call.wav'
-            if remixed_wav.exists():
-                call_id = call_folder.name
-                call_entries.append({
-                    'call_id': call_id,
-                    'output_files': [str(remixed_wav)],
-                    'original_title_for_id3': call_id
-                })
+        remix_dir = run_folder / 'remix'
+        if call_dir.exists():
+            print("[WARN] No remix entries found in manifest; scanning call/ directory for remixed calls.")
+            for call_folder in call_dir.iterdir():
+                if not call_folder.is_dir():
+                    continue
+                remixed_wav = call_folder / 'remixed_call.wav'
+                if remixed_wav.exists():
+                    call_id = call_folder.name
+                    call_entries.append({
+                        'call_id': call_id,
+                        'output_files': [str(remixed_wav)],
+                        'original_title_for_id3': call_id
+                    })
+        elif remix_dir.exists():
+            print("[WARN] No remix entries found in manifest; scanning remix/ directory for remixed segments.")
+            for seg_folder in remix_dir.iterdir():
+                if not seg_folder.is_dir():
+                    continue
+                remixed_wav = seg_folder / 'remixed_segment.wav'
+                if remixed_wav.exists():
+                    seg_id = seg_folder.name
+                    call_entries.append({
+                        'call_id': seg_id,
+                        'output_files': [str(remixed_wav)],
+                        'original_title_for_id3': seg_id
+                    })
+        else:
+            print("[ERROR] Neither call/ nor remix/ directory found for remixed outputs.")
+            return
     for entry in call_entries:
         call_id = entry.get('call_id')
         wav_path = Path(entry.get('output_files')[0]) if entry.get('output_files') else None

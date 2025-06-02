@@ -81,7 +81,7 @@ The-Machine supports local LLM inference using [LM Studio](https://lmstudio.ai/)
 - In your LLM config (e.g., `workflows/llm_tasks.json`), set the API endpoint to `http://localhost:1234/v1`.
 - Or, use the CLI flag to specify the config:
   ```sh
-  python pipeline_orchestrator.py <input_dir> --llm_config workflows/llm_tasks.json
+  python main.py <input_dir> --llm_config workflows/llm_tasks.json
   ```
 - Make sure your LLM config matches the model's expected prompt format (e.g., chat template, system prompt).
 

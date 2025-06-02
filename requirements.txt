@@ -38,7 +38,27 @@ nemo_toolkit[asr]>=1.22.0
 openai-whisper
 
 # Audio separation
-# (audio-separator is a third-party tool, install as needed)
+# (Demucs is required for source separation nodes)
+demucs
+# (Spleeter is an optional alternative for separation)
+spleeter
+
+# Loudness normalization
+pyloudnorm
+
+# Speaker diarization
+pyannote.audio
+
+# ComfyUI (node-based UI for pipeline)
+# If not available on PyPI, see README for install instructions
+comfyui
+
+# Optional: ffmpeg-python (for programmatic ffmpeg, but system ffmpeg is still required)
+ffmpeg-python
+
+# Testing
+pytest
+pytest-cov
 
 # For YouTube/URL audio ingestion
 yt_dlp

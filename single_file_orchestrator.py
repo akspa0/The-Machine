@@ -118,20 +118,16 @@ class PipelineOrchestrator:
             self._console_buffer.append(f"[bold green]Manifest written to {manifest_path}[/]")
     def add_separation_jobs(self):
         """
-        After renaming, create jobs for audio separation for each left/right file in renamed/.
-        Single files (like 'out' files) skip separation and are copied directly for diarization.
+        After renaming, create jobs for audio separation for each file in renamed/.
+        Only single files are supported (no tuple/call or left/right logic).
         """
         renamed_dir = self.run_folder / 'renamed'
-        
-        # Check if renamed directory exists
         if not renamed_dir.exists():
             self.log_event('WARNING', 'renamed_directory_missing', {
                 'renamed_dir': str(renamed_dir),
                 'message': 'No renamed directory found, skipping separation job creation'
             })
             return
-        
-        # Check if directory is empty
         renamed_files = list(renamed_dir.glob('*'))
         if not renamed_files:
             self.log_event('WARNING', 'renamed_directory_empty', {
@@ -139,14 +135,9 @@ class PipelineOrchestrator:
                 'message': 'Renamed directory is empty, no separation jobs to create'
             })
             return
-        
         separation_job_count = 0
-        single_file_count = 0
-        
-        # --- Refactored separation logic ---
-        # Tuple/call inputs: left/right channel files
         for file in renamed_dir.iterdir():
-            if file.is_file() and ('-left-' in file.name or '-right-' in file.name):
+            if file.is_file():
                 # Skip files under 200KB
                 if file.stat().st_size < 200 * 1024:
                     self.log_event('WARNING', 'file_too_small_for_separation', {'file': str(file), 'size_bytes': file.stat().st_size})
@@ -159,38 +150,6 @@ class PipelineOrchestrator:
                     sf.write(str(wav_path), audio, sr)
                     self.log_event('INFO', 'converted_to_wav', {'original': str(input_path), 'converted': str(wav_path)})
                     input_path = wav_path
-                job_data = {
-                    'input_path': str(input_path),
-                    'input_name': input_path.name
-                }
-                job_id = f"separate_{input_path.stem}"
-                self.jobs.append(Job(job_id=job_id, data=job_data, job_type='separate'))
-                separation_job_count += 1
-                self.log_event('INFO', 'separation_job_created_tuple', {'input': str(input_path)})
-        # Single-file inputs: not left/right, treat as 'mixture'
-        for file in renamed_dir.iterdir():
-            if file.is_file() and not ('-left-' in file.name or '-right-' in file.name):
-                # Skip files under 200KB
-                if file.stat().st_size < 200 * 1024:
-                    self.log_event('WARNING', 'file_too_small_for_separation', {'file': str(file), 'size_bytes': file.stat().st_size})
-                    continue
-                input_path = file
-                if input_path.suffix.lower() != '.wav':
-                    import soundfile as sf
-                    audio, sr = sf.read(str(input_path))
-                    wav_path = input_path.with_suffix('.wav')
-                    sf.write(str(wav_path), audio, sr)
-                    self.log_event('INFO', 'converted_to_wav', {'original': str(input_path), 'converted': str(wav_path)})
-                    input_path = wav_path
-                # Rename to mixture.wav for model compatibility
-                from pathlib import Path
-                mixture_path = input_path.parent / 'mixture.wav'
-                if input_path.name != 'mixture.wav':
-                    import shutil
-                    shutil.copy2(input_path, mixture_path)
-                    self.log_event('INFO', 'renamed_for_separation', {'original': str(input_path), 'renamed': str(mixture_path)})
-                else:
-                    mixture_path = input_path
                 # Extract metadata using mutagen
                 import mutagen
                 metadata = {}
@@ -203,8 +162,7 @@ class PipelineOrchestrator:
                     self.log_event('INFO', 'metadata_extracted', {'input': str(file), 'metadata': metadata})
                 except Exception as e:
                     self.log_event('WARNING', 'metadata_extraction_failed', {'input': str(file), 'error': str(e)})
-                call_id = file.stem.split('-')[0]
-                separated_dir = self.run_folder / 'separated' / call_id
+                separated_dir = self.run_folder / 'separated' / f"{separation_job_count:04d}"
                 separated_dir.mkdir(parents=True, exist_ok=True)
                 metadata_path = separated_dir / 'metadata.json'
                 try:
@@ -215,19 +173,17 @@ class PipelineOrchestrator:
                 except Exception as e:
                     self.log_event('WARNING', 'metadata_write_failed', {'output': str(metadata_path), 'error': str(e)})
                 job_data = {
-                    'input_path': str(mixture_path),
-                    'input_name': mixture_path.name,
+                    'input_path': str(input_path),
+                    'input_name': input_path.name,
                     'separated_dir': str(separated_dir),
                     'metadata_path': str(metadata_path)
                 }
-                job_id = f"separate_{call_id}_singlefile"
+                job_id = f"separate_{separation_job_count:04d}_singlefile"
                 self.jobs.append(Job(job_id=job_id, data=job_data, job_type='separate'))
                 separation_job_count += 1
-                self.log_event('INFO', 'separation_job_created_single', {'input': str(mixture_path), 'separated_dir': str(separated_dir)})
-        
+                self.log_event('INFO', 'separation_job_created_single', {'input': str(input_path), 'separated_dir': str(separated_dir)})
         self.log_event('INFO', 'separation_jobs_created', {
             'separation_job_count': separation_job_count,
-            'single_file_count': single_file_count,
             'total_files': len(renamed_files)
         })
 
@@ -235,6 +191,7 @@ class PipelineOrchestrator:
         """
         Run audio separation for all jobs of type 'separate'.
         Updates manifest and logs via orchestrator methods.
+        After separation, move/copy all output stems (vocals.wav, instrumental.wav, etc.) from the nested subfolder up to the separated/<index>/ directory, renaming as <index>-<stem_type>.wav. Update manifest to reference the new paths. Remove the now-empty subfolder if possible.
         """
         import json
         separated_dir = self.run_folder / 'separated'
@@ -253,10 +210,39 @@ class PipelineOrchestrator:
                     'output_stems': [s['output_path'] for s in result['output_stems']]
                 })
                 job.success = True
+                # Move/copy stems up one level and rename
+                for s in result['output_stems']:
+                    orig_path = Path(s['output_path'])
+                    stem_type = s.get('stem_type', orig_path.stem)
+                    new_name = f"{job_separated_dir.name}-{stem_type}.wav"
+                    new_path = job_separated_dir / new_name
+                    if orig_path.exists() and orig_path != new_path:
+                        import shutil
+                        shutil.copy2(orig_path, new_path)
+                        self.log_event('INFO', 'stem_moved', {'from': str(orig_path), 'to': str(new_path)})
+                # Optionally remove the now-empty subfolder
+                for s in result['output_stems']:
+                    orig_path = Path(s['output_path'])
+                    if orig_path.parent != job_separated_dir:
+                        try:
+                            import os
+                            if orig_path.exists():
+                                os.remove(orig_path)
+                            if not any(orig_path.parent.iterdir()):
+                                os.rmdir(orig_path.parent)
+                        except Exception as e:
+                            self.log_event('WARNING', 'stem_cleanup_failed', {'folder': str(orig_path.parent), 'error': str(e)})
+                # Update manifest to reference new paths
+                updated_stems = []
+                for s in result['output_stems']:
+                    stem_type = s.get('stem_type', Path(s['output_path']).stem)
+                    new_name = f"{job_separated_dir.name}-{stem_type}.wav"
+                    new_path = job_separated_dir / new_name
+                    updated_stems.append({'stem_type': stem_type, 'output_path': str(new_path)})
                 if 'metadata_path' in job.data:
                     vocals_stem = None
-                    for s in result['output_stems']:
-                        if 'vocals' in s['output_path']:
+                    for s in updated_stems:
+                        if 'vocals' in s['stem_type']:
                             vocals_stem = s['output_path']
                             break
                     if vocals_stem:
@@ -272,6 +258,12 @@ class PipelineOrchestrator:
                             self.log_event('INFO', 'metadata_propagated', {'output': vocals_stem, 'metadata': metadata})
                         except Exception as e:
                             self.log_event('WARNING', 'metadata_propagation_failed', {'output': vocals_stem, 'error': str(e)})
+                self.manifest.append({
+                    'stage': 'separated',
+                    'input_name': result['input_name'],
+                    'output_stems': updated_stems,
+                    'separation_status': result['separation_status']
+                })
             else:
                 self.log_event('ERROR', 'audio_separation_failed', {
                     'input_name': result['input_name'],
@@ -279,12 +271,6 @@ class PipelineOrchestrator:
                 })
                 job.success = False
                 job.error = result['stderr']
-            self.manifest.append({
-                'stage': 'separated',
-                'input_name': result['input_name'],
-                'output_stems': result['output_stems'],
-                'separation_status': result['separation_status']
-            })
         manifest_path = separated_dir / 'separation_manifest.json'
         with open(manifest_path, 'w', encoding='utf-8') as f:
             json.dump([{
@@ -296,35 +282,25 @@ class PipelineOrchestrator:
 
     def run_diarization_stage(self, hf_token=None, min_speakers=None):
         """
-        Run speaker diarization for all vocal files in separated/<call id>/.
-        Handles both traditional *-vocals.wav files and complete *-conversation.wav files.
-        Sets max_speakers=8 for all files (model limit).
+        Run speaker diarization for all vocal files in separated/<index>/.
+        Only single files are supported (no tuple/call or left/right logic).
         Updates manifest and logs via orchestrator methods.
-        Logs every file written and updates manifest.
         """
         separated_dir = self.run_folder / 'separated'
         diarized_dir = self.run_folder / 'diarized'
         diarized_dir.mkdir(exist_ok=True)
         self.log_event('INFO', 'diarization_start', {'max_speakers': 8})
-        
-        # Find all files to diarize (vocals from separation + complete conversations)
         audio_files = []
-        for call_dir in separated_dir.iterdir():
-            if not call_dir.is_dir():
+        for sep_subdir in separated_dir.iterdir():
+            if not sep_subdir.is_dir():
                 continue
-            # Traditional pattern: left-vocals.wav, right-vocals.wav
-            for vocals_file in call_dir.glob('*-vocals.wav'):
-                audio_files.append(vocals_file)
-            # Complete conversation pattern: *-conversation.wav
-            for conv_file in call_dir.glob('*-conversation.wav'):
-                audio_files.append(conv_file)
-        
+            for wav_file in sep_subdir.glob('*.wav'):
+                audio_files.append(wav_file)
         if not audio_files:
             self.log_event('WARNING', 'no_audio_files_found', {
                 'separated_dir': str(separated_dir),
                 'message': 'No audio files found for diarization'
             })
-        
         results = batch_diarize(
             str(separated_dir),
             str(diarized_dir),
@@ -336,7 +312,7 @@ class PipelineOrchestrator:
         for result in results:
             self.log_and_manifest(
                 stage='diarized',
-                call_id=result.get('call_id'),
+                call_id=None,
                 input_files=[str(result.get('input_name'))],
                 output_files=[str(result.get('json'))],
                 params={'max_speakers': 8},
@@ -622,217 +598,181 @@ class PipelineOrchestrator:
         """
         Copy and rename valid soundbites from speakers/ to soundbites/ folder, using <index>-<short_transcription>.* naming.
         Only includes valid soundbites (with transcript and duration >= 1s).
-        Formats master transcript as [CHANNEL][SpeakerXX][start-end]: Transcription.
-        Also generates new segment logs in soundbites/<call_id>/<channel>/ with transcript text.
-        The master transcript for each call is the canonical input for LLM tasks.
+        Formats master transcript as [SpeakerXX][start-end]: Transcription.
+        Also generates new segment logs in soundbites/<segment_index>/<speaker>/ with transcript text.
+        The master transcript is the canonical input for LLM tasks.
         Integrates CLAP events with confidence >= 0.90 as [CLAP][start-end]: <label> (high confidence), sorted chronologically.
         Logs every file written and updates manifest.
         Filters out malformed segment entries.
         """
         import shutil
         import json
+        from collections import defaultdict
         speakers_dir = self.run_folder / 'speakers'
-        separated_dir = self.run_folder / 'separated'
         soundbites_dir = self.run_folder / 'soundbites'
         soundbites_dir.mkdir(exist_ok=True)
-        from collections import defaultdict
         segments = [entry for entry in self.manifest if entry.get('stage') == 'speaker_segmented']
-        calls = defaultdict(list)
+        # Process each segment independently
+        master_soundbites = []
         for seg in segments:
-            calls[seg.get('call_id')].append(seg)
-        for call_id, segs in calls.items():
-            call_soundbites = []
-            channel_segments = defaultdict(list)
-            clap_events = []
-            clap_dir = self.run_folder / 'clap' / call_id
-            for channel in ['left-vocals', 'right-vocals']:
-                clap_json = clap_dir / f"{channel}_clap_annotations.json"
-                if clap_json.exists():
-                    with open(clap_json, 'r', encoding='utf-8') as f:
-                        clap_data = json.load(f)
-                    for event in clap_data.get('events', []):
-                        if event.get('confidence', 0) >= 0.90:
-                            clap_events.append({
-                                'start': event.get('start', 0),
-                                'end': event.get('end', 0),
-                                'label': event.get('label', 'unknown'),
-                                'confidence': event.get('confidence'),
-                                'channel': channel
-                            })
-            # Determine what channels are present
-            present_channels = set(s.get('channel', '') for s in segs)
-            has_tuple = any(c in ['left-vocals', 'right-vocals'] for c in present_channels)
-            has_conversation = any('conversation' in c for c in present_channels)
-            # Filter segs: if tuple channels exist, only process those; else, process conversation channels
-            valid_segs = []
-            for s in segs:
-                if s.get('call_id') != call_id:
-                    continue
-                channel = s.get('channel', '')
-                if has_tuple:
-                    if channel not in ['left-vocals', 'right-vocals']:
-                        self.log_event('WARNING', 'skipped_non_tuple_channel_segment', {'call_id': call_id, 'channel': channel, 'segment': s})
-                        continue
-                else:
-                    # Accept conversation/mono channels
-                    if 'conversation' not in channel:
-                        self.log_event('WARNING', 'skipped_non_conversation_channel_segment', {'call_id': call_id, 'channel': channel, 'segment': s})
-                        continue
-                if 'start' in s:
-                    valid_segs.append(s)
-                else:
-                    self.log_event('WARNING', 'malformed_segment_entry', {'entry': s})
-            if has_tuple:
-                self.log_event('INFO', 'processing_call_as_tuple', {'call_id': call_id, 'channels': list(present_channels)})
-            elif has_conversation:
-                self.log_event('INFO', 'processing_call_as_single_file', {'call_id': call_id, 'channels': list(present_channels)})
-            else:
-                self.log_event('WARNING', 'no_valid_segments_for_call', {'call_id': call_id, 'channels': list(present_channels)})
-            for seg in sorted(valid_segs, key=lambda s: (s['channel'], s['start'])):
-                channel = seg['channel']
-                speaker = seg['speaker']
-                start = seg['start']
-                end = seg['end']
-                duration = end - start if end and start else 0
-                if duration < 1.0:
-                    continue
-                idx = seg['index']
-                transcript_entry = next((e for e in self.manifest if e.get('stage') == 'soundbite_valid' and e.get('call_id') == call_id and e.get('channel') == channel and e.get('speaker') == speaker and e.get('index') == idx), None)
-                transcript = transcript_entry['text'] if transcript_entry and transcript_entry.get('text') else None
-                if not transcript or not transcript.strip():
-                    continue
-                if channel in ['left-vocals', 'right-vocals']:
-                    channel_fmt = f"[{channel.replace('-vocals','').upper()}]"
-                else:
-                    channel_fmt = "[CONVERSATION]"
-                spk_num = ''.join(filter(str.isdigit, speaker))
-                spk_fmt = f"[Speaker{int(spk_num):02d}]" if spk_num else f"[{speaker}]"
-                spk_dir = speakers_dir / call_id / channel / speaker
-                base_index = f"{idx:04d}"
-                orig_wav = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.wav')), None)
-                orig_txt = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.txt')), None)
-                orig_json = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.json')), None)
-                out_dir = soundbites_dir / call_id / channel / speaker
-                out_dir.mkdir(parents=True, exist_ok=True)
-                out_base = f"{idx:04d}-{self.sanitize(transcript)}"
-                out_wav = out_dir / (out_base + '.wav')
-                out_txt = out_dir / (out_base + '.txt') if orig_txt else None
-                out_json = out_dir / (out_base + '.json') if orig_json else None
-                if orig_wav and os.path.exists(orig_wav):
-                    shutil.copy2(orig_wav, out_wav)
-                if orig_txt and os.path.exists(orig_txt) and out_txt:
-                    shutil.copy2(orig_txt, out_txt)
-                if orig_json and os.path.exists(orig_json) and out_json:
-                    shutil.copy2(orig_json, out_json)
-                self.log_and_manifest(
-                    stage='final_soundbite',
-                    call_id=call_id,
-                    input_files=[str(orig_wav), str(orig_txt) if orig_txt else None, str(orig_json) if orig_json else None],
-                    output_files=[str(out_wav), str(out_txt) if out_txt else None, str(out_json) if out_json else None],
-                    params={'channel': channel, 'speaker': speaker},
-                    metadata={'duration': duration},
-                    event='file_written',
-                    result='success'
-                )
-                manifest_entry = dict(seg)
-                manifest_entry['stage'] = 'final_soundbite'
-                manifest_entry['soundbite_wav'] = str(out_wav)
-                manifest_entry['transcript'] = transcript
-                manifest_entry['txt'] = str(out_txt) if out_txt else None
-                manifest_entry['json'] = str(out_json) if out_json else None
-                self.manifest.append(manifest_entry)
-                call_soundbites.append({
-                    'channel_fmt': channel_fmt,
-                    'spk_fmt': spk_fmt,
-                    'start': start,
-                    'end': end,
-                    'transcript': transcript
-                })
-                channel_segments[channel].append({
-                    'speaker': speaker,
-                    'start': start,
-                    'end': end,
-                    'transcript': transcript
-                })
-            all_events = [
-                {
-                    'type': 'soundbite',
-                    'start': s['start'],
-                    'end': s['end'],
-                    'text': f"{s['channel_fmt']}{s['spk_fmt']}[{s['start']:.2f}-{s['end']:.2f}]: {s['transcript']}"
-                } for s in call_soundbites
-            ] + [
-                {
-                    'type': 'clap',
-                    'start': e['start'],
-                    'end': e['end'],
-                    'text': f"[CLAP][{e['start']:.2f}-{e['end']:.2f}]: {e['label']} (high confidence)"
-                } for e in clap_events
-            ]
-            all_events_sorted = sorted(all_events, key=lambda x: x['start'])
-            master_txt = soundbites_dir / call_id / f"{call_id}_master_transcript.txt"
-            if not call_soundbites:
-                self.log_event('WARNING', 'no_valid_soundbites_for_call', {'call_id': call_id})
+            idx = seg.get('index')
+            channel = seg.get('channel')
+            speaker = seg.get('speaker')
+            start = seg.get('start')
+            end = seg.get('end')
+            duration = end - start if end is not None and start is not None else 0
+            if duration < 1.0:
                 continue
-            with open(master_txt, 'w', encoding='utf-8') as f:
-                for ev in all_events_sorted:
-                    f.write(f"{ev['text']}\n")
+            if not channel:
+                self.log_event('WARNING', 'channel_missing', {'idx': idx, 'speaker': speaker})
+                continue
+            # Use call_id for the top-level directory, not idx
+            call_id = seg.get('call_id', '0000')
+            spk_dir = speakers_dir / call_id / channel / speaker
+            if not spk_dir.exists():
+                self.log_event('WARNING', 'speaker_dir_missing', {'spk_dir': str(spk_dir), 'idx': idx, 'channel': channel, 'speaker': speaker})
+                continue
+            # Use the full unique base filename for this segment
+            wav_path = seg.get('wav')
+            if not wav_path:
+                self.log_event('WARNING', 'wav_path_missing', {'seg': seg})
+                continue
+            base_name = Path(wav_path).stem
+            orig_wav = spk_dir / (base_name + '.wav')
+            orig_txt = spk_dir / (base_name + '.txt')
+            orig_json = spk_dir / (base_name + '.json')
+            out_dir = soundbites_dir / f"{idx:04d}" / channel / speaker
+            out_dir.mkdir(parents=True, exist_ok=True)
+            # --- FIX: transcript lookup and check ---
+            transcript_entry = next((e for e in self.manifest if e.get('stage') == 'soundbite_valid' and e.get('index') == idx and e.get('speaker') == speaker and e.get('channel') == channel), None)
+            transcript = transcript_entry.get('text') if transcript_entry and transcript_entry.get('text') else None
+            if not transcript or not transcript.strip():
+                continue
+            # --- END FIX ---
+            out_base = f"{idx:04d}-{self.sanitize(transcript)}"
+            out_wav = out_dir / (out_base + '.wav')
+            out_txt = out_dir / (out_base + '.txt') if orig_txt.exists() else None
+            out_json = out_dir / (out_base + '.json') if orig_json.exists() else None
+            if orig_wav.exists():
+                shutil.copy2(orig_wav, out_wav)
+            if orig_txt and orig_txt.exists() and out_txt:
+                shutil.copy2(orig_txt, out_txt)
+            if orig_json and orig_json.exists() and out_json:
+                shutil.copy2(orig_json, out_json)
             self.log_and_manifest(
-                stage='master_transcript',
-                call_id=call_id,
+                stage='final_soundbite',
+                call_id=None,
+                input_files=[str(orig_wav), str(orig_txt) if orig_txt else None, str(orig_json) if orig_json else None],
+                output_files=[str(out_wav), str(out_txt) if out_txt else None, str(out_json) if out_json else None],
+                params={'speaker': speaker, 'channel': channel},
+                metadata={'duration': duration},
+                event='file_written',
+                result='success'
+            )
+            manifest_entry = dict(seg)
+            manifest_entry['stage'] = 'final_soundbite'
+            manifest_entry['soundbite_wav'] = str(out_wav)
+            manifest_entry['transcript'] = transcript
+            manifest_entry['txt'] = str(out_txt) if out_txt else None
+            manifest_entry['json'] = str(out_json) if out_json else None
+            self.manifest.append(manifest_entry)
+            master_soundbites.append({
+                'spk_fmt': f"[Speaker{speaker}]",
+                'start': start,
+                'end': end,
+                'transcript': transcript
+            })
+        # CLAP events (optional, if present)
+        clap_events = []
+        clap_dir = self.run_folder / 'clap'
+        if clap_dir.exists():
+            for clap_json in clap_dir.glob('**/*_clap_annotations.json'):
+                with open(clap_json, 'r', encoding='utf-8') as f:
+                    clap_data = json.load(f)
+                for event in clap_data.get('events', []):
+                    if event.get('confidence', 0) >= 0.90:
+                        clap_events.append({
+                            'start': event.get('start', 0),
+                            'end': event.get('end', 0),
+                            'label': event.get('label', 'unknown'),
+                            'confidence': event.get('confidence')
+                        })
+        # Compose master transcript
+        all_events = [
+            {
+                'type': 'soundbite',
+                'start': s['start'],
+                'end': s['end'],
+                'text': f"{s['spk_fmt']}[{s['start']:.2f}-{s['end']:.2f}]: {s['transcript']}"
+            } for s in master_soundbites
+        ] + [
+            {
+                'type': 'clap',
+                'start': e['start'],
+                'end': e['end'],
+                'text': f"[CLAP][{e['start']:.2f}-{e['end']:.2f}]: {e['label']} (high confidence)"
+            } for e in clap_events
+        ]
+        all_events_sorted = sorted(all_events, key=lambda x: x['start'])
+        master_txt = soundbites_dir / 'master_transcript.txt'
+        if not master_soundbites:
+            self.log_event('WARNING', 'no_valid_soundbites', {})
+            return
+        with open(master_txt, 'w', encoding='utf-8') as f:
+            for ev in all_events_sorted:
+                f.write(f"{ev['text']}\n")
+        self.log_and_manifest(
+            stage='master_transcript',
+            call_id=None,
+            input_files=None,
+            output_files=[str(master_txt)],
+            params=None,
+            metadata=None,
+            event='file_written',
+            result='success'
+        )
+        master_json = soundbites_dir / 'master_transcript.json'
+        with open(master_json, 'w', encoding='utf-8') as f:
+            json.dump(all_events_sorted, f, indent=2, ensure_ascii=False)
+        self.log_and_manifest(
+            stage='master_transcript',
+            call_id=None,
+            input_files=None,
+            output_files=[str(master_json)],
+            params=None,
+            metadata=None,
+            event='file_written',
+            result='success'
+        )
+        # Write per-speaker transcripts
+        per_speaker_transcripts = defaultdict(list)
+        for s in master_soundbites:
+            speaker = s['spk_fmt']
+            start = s['start']
+            end = s['end']
+            transcript = s['transcript']
+            if start is not None and end is not None:
+                line = f"[{start:.2f}-{end:.2f}] {transcript}"
+            else:
+                line = transcript
+            per_speaker_transcripts[speaker].append(line)
+        speakers_dir_out = soundbites_dir / 'per_speaker_transcripts'
+        speakers_dir_out.mkdir(parents=True, exist_ok=True)
+        for speaker, utterances in per_speaker_transcripts.items():
+            transcript_path = speakers_dir_out / f'{speaker}.txt'
+            with open(transcript_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(utterances))
+            self.log_and_manifest(
+                stage='per_speaker_transcript',
+                call_id=None,
                 input_files=None,
-                output_files=[str(master_txt)],
-                params=None,
+                output_files=[str(transcript_path)],
+                params={'speaker': speaker},
                 metadata=None,
                 event='file_written',
                 result='success'
             )
-            master_json = soundbites_dir / call_id / f"{call_id}_master_transcript.json"
-            with open(master_json, 'w', encoding='utf-8') as f:
-                json.dump(all_events_sorted, f, indent=2, ensure_ascii=False)
-            self.log_and_manifest(
-                stage='master_transcript',
-                call_id=call_id,
-                input_files=None,
-                output_files=[str(master_json)],
-                params=None,
-                metadata=None,
-                event='file_written',
-                result='success'
-            )
-            # Write per-speaker transcripts for each call
-            per_speaker_transcripts = {}
-            for channel, segs in channel_segments.items():
-                for seg in segs:
-                    speaker = seg['speaker']
-                    transcript = seg['transcript']
-                    start = seg.get('start')
-                    end = seg.get('end')
-                    if speaker not in per_speaker_transcripts:
-                        per_speaker_transcripts[speaker] = []
-                    # Add [start-end] before transcript, formatted to two decimals
-                    if start is not None and end is not None:
-                        line = f"[{start:.2f}-{end:.2f}] {transcript}"
-                    else:
-                        line = transcript
-                    per_speaker_transcripts[speaker].append(line)
-            speakers_dir = soundbites_dir / call_id / 'per_speaker_transcripts'
-            speakers_dir.mkdir(parents=True, exist_ok=True)
-            for speaker, utterances in per_speaker_transcripts.items():
-                transcript_path = speakers_dir / f'{speaker}.txt'
-                with open(transcript_path, 'w', encoding='utf-8') as f:
-                    f.write('\n'.join(utterances))
-                self.log_and_manifest(
-                    stage='per_speaker_transcript',
-                    call_id=call_id,
-                    input_files=None,
-                    output_files=[str(transcript_path)],
-                    params={'speaker': speaker},
-                    metadata=None,
-                    event='file_written',
-                    result='success'
-                )
-        self.log_event('INFO', 'final_soundbites_complete', {'calls': list(calls.keys())})
+        self.log_event('INFO', 'final_soundbites_complete', {'count': len(master_soundbites)})
 
     def get_master_transcript_path(self, call_id):
         """
@@ -1485,204 +1425,97 @@ class PipelineOrchestrator:
 
     def run_remix_stage(self, call_tones=False):
         """
-        For each call, mix true peak normalized vocals + 50% instrumental for each channel, then combine with 60/40 stereo panning:
-        stereo_left = 0.6 * left_mix + 0.4 * right_mix
-        stereo_right = 0.4 * left_mix + 0.6 * right_mix
-        Output stereo remixed_call.wav. Tones are NOT appended here; tones are handled in the show stage only.
+        For each segment, mix true peak normalized vocals (or normalized if not available) into stereo (duplicate channel if mono).
+        Output stereo remixed_segment.wav for each segment/job index.
         Logs every file written and updates manifest.
-        Always uses true peak normalized vocals for best audio quality.
         """
         import soundfile as sf
         import numpy as np
         from pathlib import Path
-        
-        # Use true peak normalized vocals (if available) or fall back to regular normalized
         true_peak_dir = self.run_folder / 'true_peak_normalized'
         normalized_dir = self.run_folder / 'normalized'
         vocals_dir = true_peak_dir if true_peak_dir.exists() else normalized_dir
-        
-        separated_dir = self.run_folder / 'separated'
-        call_dir = self.run_folder / 'call'
-        call_dir.mkdir(exist_ok=True)
-        tones_path = Path('tones.wav')
-        
+        remix_dir = self.run_folder / 'remix'
+        remix_dir.mkdir(exist_ok=True)
         self.log_event('INFO', 'remix_start', {
             'vocals_source': 'true_peak_normalized' if vocals_dir == true_peak_dir else 'normalized',
             'vocals_dir': str(vocals_dir)
         })
-        
-        for call_id in os.listdir(vocals_dir):
-            call_vocals_dir = vocals_dir / call_id
-            call_sep_dir = separated_dir / call_id
-            if not call_vocals_dir.is_dir() or not call_sep_dir.is_dir():
+        for seg_dir in vocals_dir.iterdir():
+            if not seg_dir.is_dir():
                 continue
-            out_call_dir = call_dir / call_id
-            out_call_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Handle both traditional stereo calls and single conversation files
-            if (call_vocals_dir / "left-vocals.wav").exists() and (call_vocals_dir / "right-vocals.wav").exists():
-                # Traditional stereo call processing
-                left_vocal_path = call_vocals_dir / "left-vocals.wav"
-                right_vocal_path = call_vocals_dir / "right-vocals.wav"
-                left_instr_path = call_sep_dir / "left-instrumental.wav"
-                right_instr_path = call_sep_dir / "right-instrumental.wav"
-                
-                if not (left_instr_path.exists() and right_instr_path.exists()):
-                    continue
-                
-                # Mix vocals + 0.5 * instrumental for each channel
-                left_vocal, sr = sf.read(str(left_vocal_path))
-                right_vocal, _ = sf.read(str(right_vocal_path))
-                left_instr, _ = sf.read(str(left_instr_path))
-                right_instr, _ = sf.read(str(right_instr_path))
-                
-                if left_vocal.ndim > 1:
-                    left_vocal = left_vocal.mean(axis=1)
-                if right_vocal.ndim > 1:
-                    right_vocal = right_vocal.mean(axis=1)
-                if left_instr.ndim > 1:
-                    left_instr = left_instr.mean(axis=1)
-                if right_instr.ndim > 1:
-                    right_instr = right_instr.mean(axis=1)
-                
-                left_mix = left_vocal + 0.5 * left_instr
-                right_mix = right_vocal + 0.5 * right_instr
-                
-                # 60/40 panning: stereo_left = 0.6*left_mix + 0.4*right_mix, stereo_right = 0.4*left_mix + 0.6*right_mix
-                min_len = min(len(left_mix), len(right_mix))
-                left_mix = left_mix[:min_len]
-                right_mix = right_mix[:min_len]
-                stereo_left = 0.6 * left_mix + 0.4 * right_mix
-                stereo_right = 0.4 * left_mix + 0.6 * right_mix
-                stereo = np.stack([stereo_left, stereo_right], axis=-1)
-                
-                input_files = [str(left_vocal_path), str(right_vocal_path), str(left_instr_path), str(right_instr_path)]
-                
-            else:
-                # Single conversation file processing (mono to stereo)
-                conversation_vocal = None
-                for vocal_file in call_vocals_dir.glob('*.wav'):
-                    conversation_vocal = vocal_file
-                    break
-                
-                if not conversation_vocal:
-                    continue
-                
-                # Read conversation audio and create stereo mix
-                vocal_audio, sr = sf.read(str(conversation_vocal))
-                if vocal_audio.ndim > 1:
-                    vocal_audio = vocal_audio.mean(axis=1)
-                
-                # Create stereo from mono (no instrumental for single files)
-                stereo = np.stack([vocal_audio, vocal_audio], axis=-1)
-                input_files = [str(conversation_vocal)]
-            
-            remixed_path = out_call_dir / "remixed_call.wav"
-            sf.write(str(remixed_path), stereo, sr)
-            
-            self.log_and_manifest(
-                stage='remix',
-                call_id=call_id,
-                input_files=input_files,
-                output_files=[str(remixed_path)],
-                params={'panning': '60/40 split' if len(input_files) > 2 else 'mono to stereo'},
-                metadata={'vocals_source': 'true_peak_normalized' if vocals_dir == true_peak_dir else 'normalized'},
-                event='file_written',
-                result='success'
-            )
-        self.log_event('INFO', 'remix_complete', {'call_dir': str(call_dir)})
+            for wav_file in seg_dir.glob('*.wav'):
+                audio, sr = sf.read(str(wav_file))
+                if audio.ndim == 1:
+                    stereo = np.stack([audio, audio], axis=-1)
+                elif audio.ndim == 2 and audio.shape[1] == 1:
+                    stereo = np.repeat(audio, 2, axis=1)
+                else:
+                    stereo = audio
+                idx = seg_dir.name
+                out_dir = remix_dir / idx
+                out_dir.mkdir(parents=True, exist_ok=True)
+                remixed_path = out_dir / 'remixed_segment.wav'
+                sf.write(str(remixed_path), stereo, sr)
+                self.log_and_manifest(
+                    stage='remix',
+                    call_id=None,
+                    input_files=[str(wav_file)],
+                    output_files=[str(remixed_path)],
+                    params={'panning': 'mono to stereo'},
+                    metadata={'vocals_source': 'true_peak_normalized' if vocals_dir == true_peak_dir else 'normalized'},
+                    event='file_written',
+                    result='success'
+                )
+        self.log_event('INFO', 'remix_complete', {'remix_dir': str(remix_dir)})
 
     def run_show_stage(self, call_tones=False):
         """
-        Concatenate all successful remixed calls (with tones if needed) into show/show.wav (44.1kHz, stereo, 16-bit).
-        Write show/show.json with start/end times for each call and tones, plus call metadata.
-        Panning is preserved from the remix stage for each call.
+        Concatenate all remixed segments into show/show.wav (44.1kHz, stereo, 16-bit).
+        Write show/show.json with start/end times for each segment, plus metadata.
         Logs every file written and updates manifest.
-        Always uses remixed calls built from normalized vocals.
-        If call_tones is set, insert tones.wav between calls (not after the last call).
         """
         import soundfile as sf
         import numpy as np
         from pathlib import Path
         show_dir = self.run_folder / 'show'
         show_dir.mkdir(exist_ok=True)
-        call_dir = self.run_folder / 'call'
-        tones_path = Path('tones.wav')
+        remix_dir = self.run_folder / 'remix'
         show_wav_path = show_dir / 'show.wav'
         show_json_path = show_dir / 'show.json'
-        call_files = []
-        self.log_event('INFO', 'show_start', {'call_dir': str(call_dir)})
-        for call_id in sorted(os.listdir(call_dir)):
-            remixed_path = call_dir / call_id / 'remixed_call.wav'
+        segment_files = []
+        self.log_event('INFO', 'show_start', {'remix_dir': str(remix_dir)})
+        for idx in sorted(os.listdir(remix_dir)):
+            remixed_path = remix_dir / idx / 'remixed_segment.wav'
             if remixed_path.exists():
-                call_files.append((call_id, remixed_path))
+                segment_files.append((idx, remixed_path))
         show_audio = []
         show_timeline = []
         sr = 44100
         cur_time = 0.0
-        llm_dir = self.run_folder / 'llm'
-        for idx, (call_id, call_path) in enumerate(call_files):
-            audio, file_sr = sf.read(str(call_path))
+        for idx, seg_path in segment_files:
+            audio, file_sr = sf.read(str(seg_path))
             if file_sr != sr:
                 import librosa
                 audio = librosa.resample(audio.T, orig_sr=file_sr, target_sr=sr).T
             start = cur_time
             end = start + audio.shape[0] / sr
             show_audio.append(audio)
-            # --- Add LLM call title ---
-            call_title = call_id
-            call_title_path = llm_dir / call_id / 'call_title.txt'
-            if call_title_path.exists():
-                with open(call_title_path, 'r', encoding='utf-8') as f:
-                    title = f.read().strip().strip('"')
-                    if title:
-                        call_title = title
             show_timeline.append({
-                'call_id': call_id,
-                'call_title': call_title,
+                'segment_index': idx,
                 'start': start,
                 'end': end
             })
             cur_time = end
-            # Insert tones between calls if call_tones is set and not the last call
-            if call_tones and idx < len(call_files) - 1 and tones_path.exists():
-                tones, tones_sr = sf.read(str(tones_path))
-                if tones_sr != sr:
-                    import librosa
-                    tones = librosa.resample(tones.T, orig_sr=tones_sr, target_sr=sr).T
-                tones_start = cur_time
-                tones_end = tones_start + tones.shape[0] / sr
-                show_audio.append(tones)
-                show_timeline.append({
-                    'tones': True,
-                    'start': tones_start,
-                    'end': tones_end
-                })
-                cur_time = tones_end
-        # Append tones after the last call if call_tones is set and tones.wav exists
-        if call_tones and tones_path.exists() and call_files:
-            tones, tones_sr = sf.read(str(tones_path))
-            if tones_sr != sr:
-                import librosa
-                tones = librosa.resample(tones.T, orig_sr=tones_sr, target_sr=sr).T
-            tones_start = cur_time
-            tones_end = tones_start + tones.shape[0] / sr
-            show_audio.append(tones)
-            show_timeline.append({
-                'tones': True,
-                'start': tones_start,
-                'end': tones_end
-            })
-            cur_time = tones_end
         if show_audio:
             show_audio = np.concatenate(show_audio, axis=0)
             sf.write(str(show_wav_path), show_audio, sr, subtype='PCM_16')
             self.log_and_manifest(
                 stage='show',
                 call_id=None,
-                input_files=[str(f[1]) for f in call_files],
+                input_files=[str(f[1]) for f in segment_files],
                 output_files=[str(show_wav_path)],
-                params={'call_tones': call_tones},
+                params={},
                 metadata={'timeline': show_timeline},
                 event='file_written',
                 result='success'
@@ -2051,7 +1884,6 @@ def create_jobs_from_input(input_path: Path) -> List[Job]:
     IMPORTANT: No PII (original filenames or paths) may be printed or logged here! Only output anonymized counts if needed.
     """
     all_files = []
-    seen_names = set()
     # Handle both single files and directories
     if input_path.is_file():
         file = input_path.name
@@ -2061,7 +1893,6 @@ def create_jobs_from_input(input_path: Path) -> List[Job]:
             base_name = file
             all_files.append((orig_path, base_name))
         elif ext in VIDEO_EXTENSIONS:
-            # Extract audio from video file using ffmpeg
             temp_audio_dir = Path('outputs') / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}/temp_audio"
             temp_audio_dir.mkdir(parents=True, exist_ok=True)
             audio_name = Path(file).stem + '.wav'
@@ -2079,7 +1910,6 @@ def create_jobs_from_input(input_path: Path) -> List[Job]:
     elif input_path.is_dir():
         files_found = list(input_path.iterdir())
         print(f"[DEBUG] Files found in input_dir: {[str(f) for f in files_found]}")
-        # Always check for input_from_url.wav
         url_wav = input_path / 'input_from_url.wav'
         if url_wav.exists():
             print(f"[DEBUG] Found input_from_url.wav, adding as single-file job.")
@@ -2114,45 +1944,24 @@ def create_jobs_from_input(input_path: Path) -> List[Job]:
         print(f"Supported extensions: {SUPPORTED_EXTENSIONS}")
         return []
     print(f"🔧 Created {len(all_files)} job(s) for processing.")
-    # Group files into tuples by timestamp
-    tuple_groups = {}
-    singles = []
-    for orig_path, base_name in all_files:
-        file_type, _ = extract_type(base_name)
+    jobs = []
+    for idx, (orig_path, base_name) in enumerate(all_files):
+        ext = Path(base_name).suffix.lower()
         ts = os.path.getmtime(orig_path)
         ts_str = datetime.fromtimestamp(ts).strftime('%Y%m%d-%H%M%S')
-        ext = Path(base_name).suffix.lower()
-        if file_type:
-            tuple_key = ts_str  # Only timestamp for grouping
-            if tuple_key not in tuple_groups:
-                tuple_groups[tuple_key] = []
-            tuple_groups[tuple_key].append((orig_path, base_name, file_type, ts_str, ext))
-        else:
-            # Treat single audio files as 'out' files for full pipeline processing
-            file_type = 'out'  # Force single files to be processed as 'out' files
-            tuple_key = ts_str
-            if tuple_key not in tuple_groups:
-                tuple_groups[tuple_key] = []
-            tuple_groups[tuple_key].append((orig_path, base_name, file_type, ts_str, ext))
-    jobs = []
-    for idx, (ts_str, files) in enumerate(sorted(tuple_groups.items())):
-        type_order = ['left', 'right', 'out']
-        files_sorted = sorted(files, key=lambda x: type_order.index(x[2]) if x[2] in type_order else 99)
-        for subidx, (orig_path, base_name, file_type, ts_str, ext) in enumerate(files_sorted):
-            subid = TUPLE_SUBID.get(file_type, chr(100 + subidx))
-            job_data = {
-                'orig_path': str(orig_path),
-                'base_name': base_name,
-                'is_tuple': True,
-                'tuple_index': idx,
-                'subid': subid,
-                'file_type': file_type,
-                'timestamp': ts_str,
-                'ext': ext
-            }
-            print(f"[DEBUG] Creating job: {job_data}")
-            jobs.append(Job(job_id=f"tuple_{idx}_{subid}_{file_type}", data=job_data))
-    print(f"🔧 Created {len(jobs)} anonymized job(s): {len(tuple_groups)} tuple groups.")
+        job_data = {
+            'orig_path': str(orig_path),
+            'base_name': base_name,
+            'file_type': 'out',
+            'timestamp': ts_str,
+            'ext': ext,
+            'is_tuple': False,
+            'tuple_index': idx,
+            'subid': 'c'
+        }
+        job_id = f"single_{idx:04d}"
+        jobs.append(Job(job_id=job_id, data=job_data))
+    print(f"🔧 Created {len(jobs)} anonymized job(s) for single-file batch.")
     return jobs
 
 def extract_type(filename):

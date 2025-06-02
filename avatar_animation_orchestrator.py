@@ -63,7 +63,7 @@ def submit_comfyui_workflow(workflow_json, api_url):
         raise RuntimeError(f"Failed to submit workflow: {data}")
     return prompt_id
 
-def wait_for_comfyui_completion(prompt_id, api_url, timeout=120, max_empty=5):
+def wait_for_comfyui_completion(prompt_id, api_url, timeout=3600, max_empty=300):
     start = time.time()
     empty_count = 0
     while time.time() - start < timeout:
@@ -76,10 +76,9 @@ def wait_for_comfyui_completion(prompt_id, api_url, timeout=120, max_empty=5):
             if empty_count >= max_empty:
                 print(f"[ERROR] No history found for prompt_id {prompt_id} after {max_empty} tries. Assuming job is done or lost.")
                 return {}
-            time.sleep(2)
+            time.sleep(10)  # Increase poll interval for long jobs
             continue
         empty_count = 0
-        # If we get any data, assume job is done for now
         return data
     raise TimeoutError("ComfyUI job did not complete in time.")
 
@@ -179,6 +178,15 @@ def copy_and_rename_avatar(src, call_id, speaker, project_output_root):
     shutil.copy2(src, dst)
     return dst
 
+def upload_image_to_comfyui_api(image_path, api_url):
+    url = f"{api_url.rstrip('/')}/upload/image"
+    with open(image_path, 'rb') as f:
+        files = {'image': (os.path.basename(image_path), f, 'image/png')}
+        resp = requests.post(url, files=files)
+        resp.raise_for_status()
+        data = resp.json()
+        return data['name']  # e.g., 'input/filename.png'
+
 def main():
     parser = argparse.ArgumentParser(description='Orchestrate persona, avatar, and animation generation for a run-* folder.\n\nWorkflow:\n1. Run persona generator (character_persona_builder.py) if needed.\n2. Run SDXL avatar generator (sdxl_avatar_generator.py).\n3. (Optional) Run animation/video generation.')
     parser.add_argument('--run-folder', type=str, required=True, help='Path to run-* output folder.')
@@ -190,6 +198,7 @@ def main():
     parser.add_argument('--output-root', type=str, default=None, help='Output root for avatar images (defaults to run-folder).')
     parser.add_argument('--api-url', type=str, default=COMFYUI_URL, help='ComfyUI API URL (default: http://localhost:8188)')
     parser.add_argument('--comfyui-output-dir', type=str, default='output', help='ComfyUI output directory (default: output)')
+    parser.add_argument('--comfyui-input-dir', type=str, default='input', help='ComfyUI input directory (default: input)')
     args = parser.parse_args()
 
     run_folder = Path(args.run_folder)
@@ -201,20 +210,18 @@ def main():
     persona_dir = run_folder / 'characters'
     persona_manifest_path = args.persona_manifest or (persona_dir / 'persona_manifest.json')
     if not persona_manifest_path.exists():
-        print(f"[ERROR] Persona manifest not found at {persona_manifest_path}")
-        exit(1)
-    with open(persona_manifest_path, 'r', encoding='utf-8') as f:
-        persona_manifest = json.load(f)
-    persona_manifest_exists = persona_manifest_path.exists()
-    if not args.skip_persona:
-        if not persona_manifest_exists:
-            print(f"[INFO] Persona manifest not found at {persona_manifest_path}, running persona generator...")
-            cmd = [sys.executable, args.persona_generator, str(run_folder)]
-            run_subprocess(cmd)
-        else:
-            print(f"[INFO] Persona manifest found at {persona_manifest_path}, skipping persona generation.")
+        print(f"[INFO] Persona manifest not found at {persona_manifest_path}, running character_persona_builder.py...")
+        cmd = [sys.executable, "extensions/character_persona_builder.py", str(run_folder)]
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print("[ERROR] character_persona_builder.py failed.")
+            exit(1)
+        if not persona_manifest_path.exists():
+            print("[ERROR] Persona manifest still not found after running character_persona_builder.py.")
+            exit(1)
+        print(f"[INFO] Persona manifest generated at {persona_manifest_path}.")
     else:
-        print("[INFO] Skipping persona generation step (per CLI flag).")
+        print(f"[INFO] Persona manifest found at {persona_manifest_path}, skipping persona generation.")
 
     # Step 2: SDXL avatar image generation (direct API, no subprocess)
     output_root = args.output_root or str(run_folder)
@@ -231,6 +238,8 @@ def main():
     if not args.skip_avatar and avatar_workflow:
         from collections import defaultdict
         speaker_entries = defaultdict(list)
+        with open(persona_manifest_path, 'r', encoding='utf-8') as f:
+            persona_manifest = json.load(f)
         for entry in persona_manifest:
             speaker_entries[(entry['call_id'], entry['speaker'])].append(entry)
         for (call_id, speaker), entries in speaker_entries.items():
@@ -275,33 +284,38 @@ def main():
     print(f"[INFO] Found {len(avatar_images)} avatar images.")
     persona_dirs = [d for d in persona_dir.iterdir() if d.is_dir()]
     video_outputs = []
-    for persona_path in persona_dirs:
-        call_id = persona_path.parent.name
-        speaker = persona_path.name
-        cache_key = f"{call_id}_{speaker}"
-        prompt = avatar_prompt_cache.get(cache_key, "")
-        if not prompt:
-            print(f"[WARN] No cached prompt found for {cache_key}, skipping video workflow.")
+    # Load the prompt cache and manifest
+    with open(os.path.join(output_root, 'avatar_prompt_cache.json'), 'r', encoding='utf-8') as f:
+        avatar_prompt_cache = json.load(f)
+    manifest_path = comfyui_images / 'image_manifest.json'
+    with open(manifest_path, 'r', encoding='utf-8') as f:
+        persona_manifest = json.load(f)['personas']
+
+    for cache_key, prompt in avatar_prompt_cache.items():
+        if '_' not in cache_key:
+            print(f"[WARN] Unexpected cache key format: {cache_key}, skipping.")
             continue
+        call_id, speaker = cache_key.split('_', 1)
         video_prompt = prompt.strip() + " is talking to the camera"
-        # No longer require persona.md
-        output_prefix = f"{persona_path.name}_video"
-        with open(VIDEO_WORKFLOW_TEMPLATE, 'r', encoding='utf-8') as f:
-            video_workflow = json.load(f)
-        video_workflow['55']['inputs']['text'] = video_prompt
-        video_workflow['28']['inputs']['filename_prefix'] = output_prefix
-        # Find the avatar image in the speaker folder
+        persona_folder = os.path.join(str(comfyui_images), call_id, speaker)
         avatar_img = None
         for ext in ('.png', '.webp'):
-            candidate = os.path.join(persona_path, f"persona_avatar{ext}")
+            candidate = os.path.join(persona_folder, f"persona_avatar{ext}")
             if os.path.exists(candidate):
                 avatar_img = candidate
                 break
         if not avatar_img:
-            print(f"[WARN] No persona_avatar image found for {persona_path}, skipping video workflow.")
+            print(f"[WARN] No persona_avatar image found for {persona_folder}, skipping video workflow.")
             continue
-        video_workflow['52']['inputs']['image'] = avatar_img
-        video_output_files = run_comfyui_workflow(video_workflow, api_url=args.api_url, filename_prefix=output_prefix, comfyui_output_dir=args.comfyui_output_dir, project_output_dir=str(persona_path))
+        output_prefix = f"{call_id}_{speaker}_video"
+        with open(VIDEO_WORKFLOW_TEMPLATE, 'r', encoding='utf-8') as f:
+            video_workflow = json.load(f)
+        video_workflow['55']['inputs']['text'] = video_prompt
+        video_workflow['28']['inputs']['filename_prefix'] = output_prefix
+        # Upload avatar image to ComfyUI API and use the returned path as the image input for the video workflow
+        comfyui_image_path = upload_image_to_comfyui_api(avatar_img, args.api_url)
+        video_workflow['52']['inputs']['image'] = comfyui_image_path
+        video_output_files = run_comfyui_workflow(video_workflow, api_url=args.api_url, filename_prefix=output_prefix, comfyui_output_dir=args.comfyui_output_dir, project_output_dir=persona_folder)
         video_outputs.extend(video_output_files)
     print(f"[INFO] All video outputs: {video_outputs}")
     print("[INFO] Animation/video generation step complete.")

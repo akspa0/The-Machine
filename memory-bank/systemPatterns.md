@@ -40,4 +40,11 @@ Documents the system architecture, key technical decisions, design patterns, and
 
 - Librarian orchestrator <-> Extensions (stacks): all job/data flow is managed by the librarian, with extensions providing specialized processing.
 - Extensions <-> External tools (e.g., ComfyUI): all communication is via API, with outputs copied back into the project structure.
-- All jobs, files, and outputs are tracked in the manifest and (future) database. 
+- All jobs, files, and outputs are tracked in the manifest and (future) database.
+
+# System Patterns
+
+- The canonical entry point for all workflows is now `main.py`. All orchestration, job management, and extension invocation should be launched from this script.
+- The orchestrator and extension system are designed to support both batch/call and single-file workflows with a unified output structure.
+- Recent bugfixes ensure that all diarized/segmented utterances are processed and output as soundbites, with correct transcript association and manifest tracking.
+- All outputs, logs, and manifests are strictly PII-free and fully auditable. 
