@@ -27,12 +27,13 @@ except ImportError:
         return [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
 
 
-def run_llm_task(prompt, config, output_path=None, seed=None, chunking=True, single_output=False):
+def run_llm_task(prompt, config, output_path=None, seed=None, chunking=True, single_output=False, system_prompt=None):
     """
     Run an LLM task using the config dict (same as pipeline_orchestrator.py).
     If chunking=True and the prompt is too long, split into chunks and aggregate results.
     If single_output=True, only use the first chunk (for title, etc.).
     Returns the LLM response as a string. Optionally writes to output_path.
+    No continuation or sliding window logic: each chunk is sent as a single prompt, and only the direct response is used.
     """
     base_url = config.get('lm_studio_base_url', 'http://localhost:1234/v1')
     api_key = config.get('lm_studio_api_key', 'lm-studio')
@@ -43,31 +44,29 @@ def run_llm_task(prompt, config, output_path=None, seed=None, chunking=True, sin
         'Authorization': f'Bearer {api_key}',
         'Content-Type': 'application/json'
     }
-    # Chunking logic
     results = []
     if chunking:
         chunks = split_into_chunks(prompt, max_tokens=3500, model=model_id)
         if len(chunks) > 1:
             print(f"[INFO] Splitting prompt into {len(chunks)} chunks for LLM task.")
-        # For single_output tasks (e.g., title), only use the first chunk
         if single_output:
             chunks = [chunks[0]]
     else:
         chunks = [prompt]
     for idx, chunk in enumerate(chunks):
-        # Deterministic seed if provided
         chunk_seed = seed
         if chunk_seed is None:
             chunk_seed = int(hashlib.sha256((chunk + str(idx)).encode()).hexdigest(), 16) % (2**32)
         data = {
             "model": model_id,
-            "messages": [
-                {"role": "user", "content": chunk}
-            ],
+            "messages": [],
             "temperature": temperature,
             "max_tokens": max_tokens,
             "seed": chunk_seed
         }
+        if system_prompt:
+            data["messages"].append({"role": "system", "content": system_prompt})
+        data["messages"].append({"role": "user", "content": chunk})
         try:
             response = requests.post(f"{base_url}/chat/completions", headers=headers, data=json.dumps(data), timeout=60)
             if response.status_code == 200:

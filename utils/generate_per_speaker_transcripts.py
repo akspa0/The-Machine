@@ -11,6 +11,7 @@ import sys
 import os
 from pathlib import Path
 import argparse
+import logging
 
 def extract_ts(f):
     parts = f.stem.split('-')
@@ -18,36 +19,43 @@ def extract_ts(f):
         return int(parts[1])
     return 0
 
-def generate_transcripts(speakers_dir, force=False):
-    speakers_dir = Path(speakers_dir)
-    count = 0
-    for call_id_dir in speakers_dir.iterdir():
-        if not call_id_dir.is_dir():
+def generate_per_speaker_transcripts(speakers_root, force=False):
+    speakers_root = Path(speakers_root)
+    if not speakers_root.exists():
+        print(f"Speakers root {speakers_root} does not exist.")
+        return
+    for call_folder in speakers_root.iterdir():
+        if not call_folder.is_dir():
             continue
-        for channel_dir in call_id_dir.iterdir():
-            if not channel_dir.is_dir():
+        call_id = call_folder.name
+        for channel_folder in call_folder.iterdir():
+            if not channel_folder.is_dir():
                 continue
-            for speaker_dir in channel_dir.iterdir():
-                if not speaker_dir.is_dir():
+            channel = channel_folder.name
+            for speaker_folder in channel_folder.iterdir():
+                if not speaker_folder.is_dir() or not speaker_folder.name.startswith('S'):
                     continue
-                out_path = speaker_dir / 'speaker_transcript.txt'
-                if out_path.exists() and not force:
-                    print(f"[SKIP] {out_path} already exists. Use --force to overwrite.")
-                    continue
-                txt_files = sorted(speaker_dir.glob('*.txt'))
-                if not txt_files:
-                    continue
-                txt_files = sorted(txt_files, key=extract_ts)
+                speaker_id = speaker_folder.name
+                transcript_path = speaker_folder / 'speaker_transcript.txt'
+                if transcript_path.exists():
+                    if not force:
+                        print(f"[SKIP] {transcript_path} already exists.")
+                        continue
+                    else:
+                        print(f"[FORCE] Overwriting {transcript_path}.")
+                # Gather all .txt files for this speaker only (never mix channels or calls)
+                txt_files = sorted(speaker_folder.glob('*.txt'))
                 lines = []
                 for txt_file in txt_files:
-                    text = txt_file.read_text(encoding='utf-8').strip()
-                    if text:
-                        lines.append(text)
-                if lines:
-                    out_path.write_text('\n'.join(lines), encoding='utf-8')
-                    print(f"[WRITE] {out_path} ({len(lines)} utterances)")
-                    count += 1
-    print(f"[DONE] Wrote {count} speaker_transcript.txt files.")
+                    content = txt_file.read_text(encoding='utf-8').strip()
+                    if content:
+                        lines.append(content)
+                if len(lines) < 5:
+                    print(f"[SKIP] {speaker_folder} has only {len(lines)} non-empty lines (<5), skipping transcript generation.")
+                    continue
+                transcript = '\n'.join(lines)
+                transcript_path.write_text(transcript, encoding='utf-8')
+                print(f"[OK] Wrote {len(lines)} lines to {transcript_path}")
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill per-speaker transcripts in speakers/ folders.")
@@ -58,7 +66,7 @@ def main():
     if not speakers_dir.exists():
         print(f"[ERROR] speakers/ directory not found in {args.run_folder}")
         sys.exit(1)
-    generate_transcripts(speakers_dir, force=args.force)
+    generate_per_speaker_transcripts(speakers_dir, force=args.force)
 
 if __name__ == '__main__':
     main() 

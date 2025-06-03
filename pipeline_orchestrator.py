@@ -241,18 +241,18 @@ class PipelineOrchestrator:
             } for job in separation_jobs], f, indent=2)
         self.log_event('INFO', 'audio_separation_complete', {'manifest_path': str(manifest_path)})
 
-    def run_diarization_stage(self, hf_token=None, min_speakers=None):
+    def run_diarization_stage(self, hf_token=None, min_speakers=None, max_speakers=4):
         """
         Run speaker diarization for all vocal files in separated/<call id>/.
         Handles both traditional *-vocals.wav files and complete *-conversation.wav files.
-        Sets max_speakers=8 for all files (model limit).
+        Sets max_speakers=4 (2 per channel) by default.
         Updates manifest and logs via orchestrator methods.
         Logs every file written and updates manifest.
         """
         separated_dir = self.run_folder / 'separated'
         diarized_dir = self.run_folder / 'diarized'
         diarized_dir.mkdir(exist_ok=True)
-        self.log_event('INFO', 'diarization_start', {'max_speakers': 8})
+        self.log_event('INFO', 'diarization_start', {'max_speakers': max_speakers})
         
         # Find all files to diarize (vocals from separation + complete conversations)
         audio_files = []
@@ -277,7 +277,7 @@ class PipelineOrchestrator:
             str(diarized_dir),
             hf_token=hf_token,
             min_speakers=min_speakers,
-            max_speakers=8,
+            max_speakers=max_speakers,
             progress=True
         )
         for result in results:
@@ -286,7 +286,7 @@ class PipelineOrchestrator:
                 call_id=result.get('call_id'),
                 input_files=[str(result.get('input_name'))],
                 output_files=[str(result.get('json'))],
-                params={'max_speakers': 8},
+                params={'max_speakers': max_speakers},
                 metadata={'segments': len(result.get('segments', []))},
                 event='diarization_result',
                 result='success'
@@ -299,7 +299,7 @@ class PipelineOrchestrator:
                 'json': result.get('json'),
                 'segments': result.get('segments', [])
             })
-        self.log_event('INFO', 'diarization_complete', {'count': len(results), 'max_speakers': 8})
+        self.log_event('INFO', 'diarization_complete', {'count': len(results), 'max_speakers': max_speakers})
 
     def run_speaker_segmentation_stage(self):
         """
