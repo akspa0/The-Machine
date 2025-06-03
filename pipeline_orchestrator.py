@@ -27,6 +27,8 @@ import yaml
 import tempfile
 import shutil
 import subprocess
+# Replace llm_chunker import and usage with llm_utils
+from extensions import llm_utils
 
 rich_traceback_install()
 console = Console()
@@ -172,44 +174,34 @@ class PipelineOrchestrator:
         
         # Handle single files (complete conversations) - skip separation, prepare for diarization
         for file in renamed_dir.iterdir():
-            if not file.is_file():
-                continue
-            # Skip files smaller than 200KB
-            if file.stat().st_size < 200 * 1024:
-                self.log_event('INFO', 'file_skipped_too_small', {
-                    'input_name': file.name,
-                    'size_bytes': file.stat().st_size,
-                    'message': 'File skipped for diarization: smaller than 200KB'
-                })
-                continue
-            # Skip files starting with 'out-'
-            if file.name.startswith('out-'):
-                self.log_event('INFO', 'file_skipped_out_prefix', {
-                    'input_name': file.name,
-                    'message': "File skipped for diarization: starts with 'out-'"
-                })
-                continue
-            if not ('-left-' in file.name or '-right-' in file.name):
-                # This is a complete conversation file - skip separation
+            if file.is_file() and not ('-left-' in file.name or '-right-' in file.name):
+                # Calculate duration directly
+                try:
+                    info = sf.info(str(file))
+                    duration = info.duration
+                except Exception:
+                    duration = None
+                if duration is None or duration < 10.0:
+                    self.log_event('INFO', 'file_skipped_too_short', {
+                        'input_name': file.name,
+                        'duration': duration,
+                        'message': 'File skipped for diarization: <10s duration or unreadable'
+                    })
+                    continue
+                if file.name.startswith('out-'):
+                    self.log_event('INFO', 'file_skipped_out_prefix', {
+                        'input_name': file.name,
+                        'message': "File skipped for diarization: starts with 'out-'"
+                    })
+                    continue
                 single_file_count += 1
-                
-                # Extract call_id from filename (the index part)
-                call_id = file.stem.split('-')[0]  # e.g., "0000" from "0000-out-20241227-001220"
-                
-                # Create separated directory structure (even though we're not separating)
+                call_id = file.stem.split('-')[0]
                 separated_dir = self.run_folder / 'separated' / call_id
                 separated_dir.mkdir(parents=True, exist_ok=True)
-                
-                # Copy as complete conversation file for diarization
                 conversation_file = separated_dir / f"{call_id}-conversation.wav"
-                
-                # Convert to WAV if needed and copy
-                import soundfile as sf
                 try:
-                    # Read and convert to WAV
                     audio, sr = sf.read(str(file))
                     sf.write(str(conversation_file), audio, sr)
-                    
                     self.log_event('INFO', 'single_file_ready_for_diarization', {
                         'input_file': str(file),
                         'output_file': str(conversation_file),
@@ -271,18 +263,18 @@ class PipelineOrchestrator:
             } for job in separation_jobs], f, indent=2)
         self.log_event('INFO', 'audio_separation_complete', {'manifest_path': str(manifest_path)})
 
-    def run_diarization_stage(self, hf_token=None, min_speakers=None):
+    def run_diarization_stage(self, hf_token=None, min_speakers=None, max_speakers=4):
         """
         Run speaker diarization for all vocal files in separated/<call id>/.
         Handles both traditional *-vocals.wav files and complete *-conversation.wav files.
-        Sets max_speakers=8 for all files (model limit).
+        Sets max_speakers=4 (2 per channel) by default.
         Updates manifest and logs via orchestrator methods.
         Logs every file written and updates manifest.
         """
         separated_dir = self.run_folder / 'separated'
         diarized_dir = self.run_folder / 'diarized'
         diarized_dir.mkdir(exist_ok=True)
-        self.log_event('INFO', 'diarization_start', {'max_speakers': 8})
+        self.log_event('INFO', 'diarization_start', {'max_speakers': max_speakers})
         
         # Find all files to diarize (vocals from separation + complete conversations)
         audio_files = []
@@ -307,7 +299,7 @@ class PipelineOrchestrator:
             str(diarized_dir),
             hf_token=hf_token,
             min_speakers=min_speakers,
-            max_speakers=8,
+            max_speakers=max_speakers,
             progress=True
         )
         for result in results:
@@ -316,7 +308,7 @@ class PipelineOrchestrator:
                 call_id=result.get('call_id'),
                 input_files=[str(result.get('input_name'))],
                 output_files=[str(result.get('json'))],
-                params={'max_speakers': 8},
+                params={'max_speakers': max_speakers},
                 metadata={'segments': len(result.get('segments', []))},
                 event='diarization_result',
                 result='success'
@@ -329,7 +321,7 @@ class PipelineOrchestrator:
                 'json': result.get('json'),
                 'segments': result.get('segments', [])
             })
-        self.log_event('INFO', 'diarization_complete', {'count': len(results), 'max_speakers': 8})
+        self.log_event('INFO', 'diarization_complete', {'count': len(results), 'max_speakers': max_speakers})
 
     def run_speaker_segmentation_stage(self):
         """
@@ -551,6 +543,8 @@ class PipelineOrchestrator:
             success_count += 1
         self.log_event('INFO', 'transcription_complete', {'count': len(results), 'success': success_count, 'failed': fail_count, 'skipped': skip_count})
         print(f"[SUMMARY] Transcription: {success_count} succeeded, {fail_count} failed, {skip_count} skipped.")
+        # --- Write per-speaker transcripts after transcription ---
+        self.write_per_speaker_transcripts()
 
     @staticmethod
     def sanitize(text, max_words=12, max_length=40):
@@ -597,22 +591,20 @@ class PipelineOrchestrator:
 
     def run_final_soundbite_stage(self):
         """
-        Copy and rename valid soundbites from speakers/ to soundbites/ folder, using <index>-<short_transcription>.* naming.
-        Only includes valid soundbites (with transcript and duration >= 1s).
-        Formats master transcript as [CHANNEL][SpeakerXX][start-end]: Transcription.
-        Also generates new segment logs in soundbites/<call_id>/<channel>/ with transcript text.
-        The master transcript for each call is the canonical input for LLM tasks.
-        Integrates CLAP events with confidence >= 0.90 as [CLAP][start-end]: <label> (high confidence), sorted chronologically.
-        Logs every file written and updates manifest.
-        Filters out malformed segment entries.
+        Cut and export valid soundbites from true peak normalized vocals (preferred) or normalized as fallback.
+        Use segment start/end times to extract from the correct file.
+        Log source, sample rate, dtype, and output file for each soundbite.
+        Update manifest with true source.
         """
-        import shutil
         import json
+        import numpy as np
+        import soundfile as sf
+        from collections import defaultdict
         speakers_dir = self.run_folder / 'speakers'
-        separated_dir = self.run_folder / 'separated'
         soundbites_dir = self.run_folder / 'soundbites'
         soundbites_dir.mkdir(exist_ok=True)
-        from collections import defaultdict
+        true_peak_dir = self.run_folder / 'true_peak_normalized'
+        normalized_dir = self.run_folder / 'normalized'
         segments = [entry for entry in self.manifest if entry.get('stage') == 'speaker_segmented']
         calls = defaultdict(list)
         for seg in segments:
@@ -636,11 +628,9 @@ class PipelineOrchestrator:
                                 'confidence': event.get('confidence'),
                                 'channel': channel
                             })
-            # Determine what channels are present
             present_channels = set(s.get('channel', '') for s in segs)
             has_tuple = any(c in ['left-vocals', 'right-vocals'] for c in present_channels)
             has_conversation = any('conversation' in c for c in present_channels)
-            # Filter segs: if tuple channels exist, only process those; else, process conversation channels
             valid_segs = []
             for s in segs:
                 if s.get('call_id') != call_id:
@@ -651,7 +641,6 @@ class PipelineOrchestrator:
                         self.log_event('WARNING', 'skipped_non_tuple_channel_segment', {'call_id': call_id, 'channel': channel, 'segment': s})
                         continue
                 else:
-                    # Accept conversation/mono channels
                     if 'conversation' not in channel:
                         self.log_event('WARNING', 'skipped_non_conversation_channel_segment', {'call_id': call_id, 'channel': channel, 'segment': s})
                         continue
@@ -680,57 +669,97 @@ class PipelineOrchestrator:
                     continue
                 if channel in ['left-vocals', 'right-vocals']:
                     channel_fmt = f"[{channel.replace('-vocals','').upper()}]"
+                    # True peak normalized file path
+                    tp_path = true_peak_dir / call_id / f"{channel}.wav"
+                    norm_path = normalized_dir / call_id / f"{channel}.wav"
                 else:
                     channel_fmt = "[CONVERSATION]"
-                spk_num = ''.join(filter(str.isdigit, speaker))
-                spk_fmt = f"[Speaker{int(spk_num):02d}]" if spk_num else f"[{speaker}]"
-                spk_dir = speakers_dir / call_id / channel / speaker
-                base_index = f"{idx:04d}"
-                orig_wav = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.wav')), None)
-                orig_txt = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.txt')), None)
-                orig_json = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.json')), None)
-                out_dir = soundbites_dir / call_id / channel / speaker
-                out_dir.mkdir(parents=True, exist_ok=True)
-                out_base = f"{idx:04d}-{self.sanitize(transcript)}"
-                out_wav = out_dir / (out_base + '.wav')
-                out_txt = out_dir / (out_base + '.txt') if orig_txt else None
-                out_json = out_dir / (out_base + '.json') if orig_json else None
-                if orig_wav and os.path.exists(orig_wav):
-                    shutil.copy2(orig_wav, out_wav)
-                if orig_txt and os.path.exists(orig_txt) and out_txt:
-                    shutil.copy2(orig_txt, out_txt)
-                if orig_json and os.path.exists(orig_json) and out_json:
-                    shutil.copy2(orig_json, out_json)
-                self.log_and_manifest(
-                    stage='final_soundbite',
-                    call_id=call_id,
-                    input_files=[str(orig_wav), str(orig_txt) if orig_txt else None, str(orig_json) if orig_json else None],
-                    output_files=[str(out_wav), str(out_txt) if out_txt else None, str(out_json) if out_json else None],
-                    params={'channel': channel, 'speaker': speaker},
-                    metadata={'duration': duration},
-                    event='file_written',
-                    result='success'
-                )
-                manifest_entry = dict(seg)
-                manifest_entry['stage'] = 'final_soundbite'
-                manifest_entry['soundbite_wav'] = str(out_wav)
-                manifest_entry['transcript'] = transcript
-                manifest_entry['txt'] = str(out_txt) if out_txt else None
-                manifest_entry['json'] = str(out_json) if out_json else None
-                self.manifest.append(manifest_entry)
-                call_soundbites.append({
-                    'channel_fmt': channel_fmt,
-                    'spk_fmt': spk_fmt,
-                    'start': start,
-                    'end': end,
-                    'transcript': transcript
-                })
-                channel_segments[channel].append({
-                    'speaker': speaker,
-                    'start': start,
-                    'end': end,
-                    'transcript': transcript
-                })
+                    tp_path = true_peak_dir / call_id / f"{call_id}-conversation.wav"
+                    norm_path = normalized_dir / call_id / f"{call_id}-conversation.wav"
+                # Choose source file
+                src_path = None
+                src_type = None
+                if tp_path.exists():
+                    src_path = tp_path
+                    src_type = 'true_peak_normalized'
+                elif norm_path.exists():
+                    src_path = norm_path
+                    src_type = 'normalized'
+                else:
+                    self.log_event('ERROR', 'no_normalized_source_for_soundbite', {'call_id': call_id, 'channel': channel, 'segment': seg})
+                    continue
+                # Cut segment
+                try:
+                    audio, sr = sf.read(str(src_path))
+                    start_frame = int(start * sr)
+                    end_frame = int(end * sr)
+                    segment_audio = audio[start_frame:end_frame]  # This preserves all channels
+                    out_dir = soundbites_dir / call_id / channel / speaker
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    out_base = f"{idx:04d}-{self.sanitize(transcript)}"
+                    out_wav = out_dir / (out_base + '.wav')
+                    sf.write(str(out_wav), segment_audio, sr)
+                    # Logging
+                    self.log_event('INFO', 'soundbite_cut', {
+                        'call_id': call_id,
+                        'channel': channel,
+                        'speaker': speaker,
+                        'start': start,
+                        'end': end,
+                        'src_type': src_type,
+                        'src_path': str(src_path),
+                        'sample_rate': sr,
+                        'dtype': str(segment_audio.dtype) if hasattr(segment_audio, 'dtype') else str(type(segment_audio)),
+                        'output': str(out_wav)
+                    })
+                    # Copy transcript/json if available
+                    spk_dir = speakers_dir / call_id / channel / speaker
+                    base_index = f"{idx:04d}"
+                    orig_txt = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.txt')), None)
+                    orig_json = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.json')), None)
+                    out_txt = out_dir / (out_base + '.txt') if orig_txt else None
+                    out_json = out_dir / (out_base + '.json') if orig_json else None
+                    if orig_txt and os.path.exists(orig_txt) and out_txt:
+                        import shutil
+                        shutil.copy2(orig_txt, out_txt)
+                    if orig_json and os.path.exists(orig_json) and out_json:
+                        import shutil
+                        shutil.copy2(orig_json, out_json)
+                    self.log_and_manifest(
+                        stage='final_soundbite',
+                        call_id=call_id,
+                        input_files=[str(src_path), str(orig_txt) if orig_txt else None, str(orig_json) if orig_json else None],
+                        output_files=[str(out_wav), str(out_txt) if out_txt else None, str(out_json) if out_json else None],
+                        params={'channel': channel, 'speaker': speaker, 'src_type': src_type},
+                        metadata={'duration': duration, 'sample_rate': sr},
+                        event='file_written',
+                        result='success'
+                    )
+                    manifest_entry = dict(seg)
+                    manifest_entry['stage'] = 'final_soundbite'
+                    manifest_entry['soundbite_wav'] = str(out_wav)
+                    manifest_entry['transcript'] = transcript
+                    manifest_entry['txt'] = str(out_txt) if out_txt else None
+                    manifest_entry['json'] = str(out_json) if out_json else None
+                    manifest_entry['src_type'] = src_type
+                    manifest_entry['src_path'] = str(src_path)
+                    self.manifest.append(manifest_entry)
+                    call_soundbites.append({
+                        'channel_fmt': channel_fmt,
+                        'spk_fmt': f"[Speaker{''.join(filter(str.isdigit, speaker)).zfill(2)}]" if ''.join(filter(str.isdigit, speaker)) else f"[{speaker}]",
+                        'start': start,
+                        'end': end,
+                        'transcript': transcript
+                    })
+                    channel_segments[channel].append({
+                        'speaker': speaker,
+                        'start': start,
+                        'end': end,
+                        'transcript': transcript
+                    })
+                except Exception as e:
+                    self.log_event('ERROR', 'soundbite_cut_failed', {'call_id': call_id, 'channel': channel, 'speaker': speaker, 'start': start, 'end': end, 'error': str(e)})
+                    continue
             all_events = [
                 {
                     'type': 'soundbite',
@@ -883,6 +912,16 @@ class PipelineOrchestrator:
             if master_transcript.exists():
                 with open(master_transcript, 'r', encoding='utf-8') as f:
                     transcript_text = f.read()
+            # --- LLM chunking for long transcripts ---
+            token_count = estimate_tokens(transcript_text)
+            if token_count > 2048:
+                self.log_event('INFO', 'llm_chunking_applied', {
+                    'call_id': call_id,
+                    'original_token_count': token_count,
+                    'chunk_size': 2000
+                })
+                chunks = llm_utils.split_into_chunks_advanced(transcript_text, max_tokens=2000)
+                transcript_text = '\n\n'.join(chunks)
             call_llm_dir = llm_dir / call_id
             call_llm_dir.mkdir(parents=True, exist_ok=True)
             if mode == 'call':
@@ -1114,16 +1153,19 @@ class PipelineOrchestrator:
                 continue
             call_norm_dir = normalized_dir / call_id
             call_norm_dir.mkdir(parents=True, exist_ok=True)
+            # Process tuple channels
             for channel in ['left-vocals', 'right-vocals']:
                 src = call_sep_dir / f"{channel}.wav"
                 if not src.exists():
                     continue
                 audio, sr = sf.read(str(src))
-                if audio.ndim > 1:
-                    audio = audio.mean(axis=1)
+                # Do NOT average to mono here; preserve original channel count
                 if sr != 44100:
                     import librosa
-                    audio = librosa.resample(audio, orig_sr=sr, target_sr=44100)
+                    if audio.ndim == 1:
+                        audio = librosa.resample(audio, orig_sr=sr, target_sr=44100)
+                    else:
+                        audio = librosa.resample(audio.T, orig_sr=sr, target_sr=44100).T
                     sr = 44100
                 loudness = meter.integrated_loudness(audio)
                 audio_norm = pyln.normalize.loudness(audio, loudness, -14.0)
@@ -1133,6 +1175,31 @@ class PipelineOrchestrator:
                     stage='normalized',
                     call_id=call_id,
                     input_files=[str(src)],
+                    output_files=[str(out_path)],
+                    params={'target_lufs': -14.0},
+                    metadata={'measured_lufs': loudness},
+                    event='file_written',
+                    result='success'
+                )
+            # Process conversation/mono files
+            for conv_file in call_sep_dir.glob('*-conversation.wav'):
+                audio, sr = sf.read(str(conv_file))
+                # Do NOT average to mono here; preserve original channel count
+                if sr != 44100:
+                    import librosa
+                    if audio.ndim == 1:
+                        audio = librosa.resample(audio, orig_sr=sr, target_sr=44100)
+                    else:
+                        audio = librosa.resample(audio.T, orig_sr=sr, target_sr=44100).T
+                    sr = 44100
+                loudness = meter.integrated_loudness(audio)
+                audio_norm = pyln.normalize.loudness(audio, loudness, -14.0)
+                out_path = call_norm_dir / conv_file.name
+                sf.write(str(out_path), audio_norm, sr)
+                self.log_and_manifest(
+                    stage='normalized',
+                    call_id=call_id,
+                    input_files=[str(conv_file)],
                     output_files=[str(out_path)],
                     params={'target_lufs': -14.0},
                     metadata={'measured_lufs': loudness},
@@ -1150,61 +1217,43 @@ class PipelineOrchestrator:
         import pyloudnorm as pyln
         import soundfile as sf
         from pathlib import Path
-        
         normalized_dir = self.run_folder / 'normalized'
         true_peak_dir = self.run_folder / 'true_peak_normalized'
         true_peak_dir.mkdir(exist_ok=True)
-        
-        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -6.0})
-        
+        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -3.0})
         for call_id in os.listdir(normalized_dir):
             call_norm_dir = normalized_dir / call_id
             if not call_norm_dir.is_dir():
                 continue
-            
             call_tp_dir = true_peak_dir / call_id
             call_tp_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Process all vocal files (both traditional and conversation)
-            for vocal_file in call_norm_dir.glob('*.wav'):
-                src = vocal_file
-                dst = call_tp_dir / vocal_file.name
-                
+            # Process all .wav files (tuple and conversation)
+            for wav_file in call_norm_dir.glob('*.wav'):
+                src = wav_file
+                dst = call_tp_dir / wav_file.name
                 try:
                     audio, sr = sf.read(str(src))
-                    
-                    # Ensure mono for processing
-                    if audio.ndim > 1:
-                        audio = audio.mean(axis=1)
-                    
-                    # Apply true peak limiting to -6.0 dBTP
+                    # Do NOT average to mono here; preserve original channel count
                     meter = pyln.Meter(sr)
-                    peak_normalized = pyln.normalize.peak(audio, -6.0)
-                    
-                    # Save the true peak normalized audio
+                    peak_normalized = pyln.normalize.peak(audio, -3.0)
                     sf.write(str(dst), peak_normalized, sr)
-                    
-                    # Calculate true peak level for logging
                     true_peak_db = 20 * np.log10(np.max(np.abs(peak_normalized)))
-                    
                     self.log_and_manifest(
                         stage='true_peak_normalized',
                         call_id=call_id,
                         input_files=[str(src)],
                         output_files=[str(dst)],
-                        params={'target_dbtp': -6.0},
+                        params={'target_dbtp': -3.0},
                         metadata={'measured_true_peak_db': true_peak_db},
                         event='file_written',
                         result='success'
                     )
-                    
                 except Exception as e:
                     self.log_event('ERROR', 'true_peak_normalization_failed', {
                         'call_id': call_id,
-                        'file': vocal_file.name,
+                        'file': wav_file.name,
                         'error': str(e)
                     })
-        
         self.log_event('INFO', 'true_peak_normalization_complete', {'true_peak_dir': str(true_peak_dir)})
 
     def run_remix_stage(self, call_tones=False):
@@ -1452,7 +1501,24 @@ class PipelineOrchestrator:
             return
         original_audio = input_files[0]
         print(f"[DEBUG] Using original audio for CLAP: {original_audio}")
-        # Run CLAP segmentation on original audio
+        # --- NEW: Run vocal separation on the single file ---
+        from audio_separation import separate_audio_file
+        separated_dir = self.run_folder / 'separated' / '0'
+        separated_dir.mkdir(parents=True, exist_ok=True)
+        sep_result = separate_audio_file(original_audio, separated_dir, 'mel_band_roformer_vocals_fv4_gabox.ckpt')
+        if sep_result['separation_status'] == 'failed':
+            print(f"[ERROR] Vocal separation failed: {sep_result.get('stderr', '')}")
+            return
+        # Use the vocals stem for all downstream steps
+        vocals_stem = None
+        for stem in sep_result['output_stems']:
+            if stem['stem_type'] == 'vocals':
+                vocals_stem = Path(stem['output_path'])
+                break
+        if not vocals_stem or not vocals_stem.exists():
+            print("[ERROR] No vocals stem found after separation.")
+            return
+        # Run CLAP segmentation on the vocals stem
         segmented_dir = self.run_folder / 'segmented'
         segmented_dir.mkdir(parents=True, exist_ok=True)
         from clap_annotation import segment_audio_with_clap
@@ -1461,32 +1527,31 @@ class PipelineOrchestrator:
         with open(segmentation_config_path, 'r', encoding='utf-8') as f:
             segmentation_config = json.load(f)["clap_segmentation"]
         segments = segment_audio_with_clap(
-            original_audio,
+            vocals_stem,
             segmentation_config,
             segmented_dir,
             model_id=segmentation_config.get("model_id", "laion/clap-htsat-unfused"),
             chunk_length_sec=segmentation_config.get("chunk_length_sec", 5),
             overlap_sec=segmentation_config.get("overlap_sec", 2)
         )
-        # If segments found, process each segment; else, process the whole file
+        # If segments found, process each segment; else, process the whole vocals stem
         files_to_process = []
         if segments:
             print(f"[DEBUG] CLAP segmentation found {len(segments)} segments.")
             for seg in segments:
                 files_to_process.append(Path(seg["output_path"]))
         else:
-            print("[DEBUG] No CLAP segments found; processing whole file.")
-            files_to_process = [original_audio]
-        # For each file (segment or whole), perform separation and downstream steps
+            print("[DEBUG] No CLAP segments found; processing whole vocals stem.")
+            files_to_process = [vocals_stem]
+        # For each file (segment or whole), perform downstream steps
         for idx, audio_file in enumerate(files_to_process):
             print(f"[DEBUG] Processing segment {idx}: {audio_file}")
-            # Place segment in a per-segment input folder for separation
             seg_input_dir = self.run_folder / 'segment_inputs' / f'segment_{idx:04d}'
             seg_input_dir.mkdir(parents=True, exist_ok=True)
             seg_audio_path = seg_input_dir / audio_file.name
             import shutil
             shutil.copy2(audio_file, seg_audio_path)
-            # Ingest segment as a job
+            # Ingest segment as a job (for manifest consistency, not used for separation)
             job = Job(job_id=f'segment_{idx:04d}', data={
                 'orig_path': str(seg_audio_path),
                 'base_name': seg_audio_path.name,
@@ -1498,32 +1563,11 @@ class PipelineOrchestrator:
                 'ext': seg_audio_path.suffix
             })
             self.jobs = [job]  # Overwrite jobs for this segment
-            self.add_separation_jobs()
-            self.run_audio_separation_stage()
+            # --- Downstream steps ---
+            # No separation needed, already have vocals
             self.run_normalization_stage()
             self.run_true_peak_normalization_stage()
-            # Use separated vocals for downstream steps
-            separated_dir = self.run_folder / 'separated' / f'{idx:04d}'
-            vocal_path = separated_dir / 'out-vocals.wav'
-            if not vocal_path.exists():
-                wavs = list(separated_dir.glob('*.wav'))
-                if not wavs:
-                    print(f"[ERROR] No separated vocals found for segment {idx}.")
-                    continue
-                vocal_path = wavs[0]
-            # Run CLAP annotation on the separated vocal (for context, not segmentation)
-            from clap_annotation import annotate_clap_for_out_files
-            clap_dir = self.run_folder / 'clap' / f'{idx:04d}'
-            annotate_clap_for_out_files(
-                input_dir=Path(vocal_path).parent,
-                output_dir=clap_dir,
-                prompts=segmentation_config.get("prompts", []),
-                model_id=segmentation_config.get("model_id", "laion/clap-htsat-unfused"),
-                chunk_length_sec=segmentation_config.get("chunk_length_sec", 5),
-                overlap_sec=segmentation_config.get("overlap_sec", 2),
-                confidence_threshold=segmentation_config.get("confidence_threshold", 0.6)
-            )
-            # Downstream steps
+            # Use normalized vocals for diarization, etc.
             self.run_diarization_stage()
             self.run_speaker_segmentation_stage()
             self.run_resample_segments_stage()
@@ -1770,6 +1814,46 @@ class PipelineOrchestrator:
                     transcripts[speaker_id] = '\n'.join(utterances)
         return transcripts
 
+    def write_per_speaker_transcripts(self):
+        """
+        For each speakers/<call_id>/<channel>/<speaker>/, concatenate all *.txt files in timestamp order into speaker_transcript.txt.
+        """
+        import glob
+        speakers_dir = self.run_folder / 'speakers'
+        for call_id_dir in speakers_dir.iterdir():
+            if not call_id_dir.is_dir():
+                continue
+            for channel_dir in call_id_dir.iterdir():
+                if not channel_dir.is_dir():
+                    continue
+                for speaker_dir in channel_dir.iterdir():
+                    if not speaker_dir.is_dir():
+                        continue
+                    txt_files = sorted(speaker_dir.glob('*.txt'))
+                    if not txt_files:
+                        continue
+                    # Sort by timestamp in filename if possible
+                    def extract_ts(f):
+                        parts = f.stem.split('-')
+                        if len(parts) > 1 and parts[1].isdigit():
+                            return int(parts[1])
+                        return 0
+                    txt_files = sorted(txt_files, key=extract_ts)
+                    lines = []
+                    for txt_file in txt_files:
+                        text = txt_file.read_text(encoding='utf-8').strip()
+                        if text:
+                            lines.append(text)
+                    if lines:
+                        out_path = speaker_dir / 'speaker_transcript.txt'
+                        out_path.write_text('\n'.join(lines), encoding='utf-8')
+                        self.log_event('INFO', 'wrote_per_speaker_transcript', {
+                            'call_id': call_id_dir.name,
+                            'channel': channel_dir.name,
+                            'speaker': speaker_dir.name,
+                            'output': str(out_path)
+                        })
+
 def create_jobs_from_input(input_path: Path) -> List[Job]:
     """Create jobs from input path (can be a single file or directory)
     IMPORTANT: No PII (original filenames or paths) may be printed or logged here! Only output anonymized counts if needed.
@@ -1996,6 +2080,13 @@ if __name__ == '__main__':
         # Set input_dir to raw_inputs_dir for downstream processing
         args.input_dir = str(raw_inputs_dir)
 
+    # --- PATCH: If input_dir is outputs/run-XXXXXX/raw_inputs, use parent run- folder for all processing ---
+    from pathlib import Path
+    input_dir_path = Path(args.input_dir) if args.input_dir else None
+    if input_dir_path and input_dir_path.name == 'raw_inputs' and input_dir_path.parent.name.startswith('run-'):
+        run_folder = input_dir_path.parent
+        print(f"[PATCH] Using existing run folder from yt-dlp: {run_folder}")
+
     # Handle --force logic
     if args.output_folder and args.resume_from and args.force:
         # Clear state and delete outputs from the specified stage forward
@@ -2141,7 +2232,12 @@ if __name__ == '__main__':
             exit(1)
         if args.show_resume_status:
             from resume_utils import print_resume_status
-            run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            # PATCH: Use run_folder from yt-dlp patch if set, else create new
+            input_dir_path = Path(args.input_dir)
+            if input_dir_path.name == 'raw_inputs' and input_dir_path.parent.name.startswith('run-'):
+                run_folder = input_dir_path.parent
+            else:
+                run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             if Path("outputs").exists():
                 run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
                 if run_folders:
@@ -2150,7 +2246,12 @@ if __name__ == '__main__':
             exit(0)
         if args.stage_status:
             from resume_utils import print_stage_status
-            run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            # PATCH: Use run_folder from yt-dlp patch if set, else create new
+            input_dir_path = Path(args.input_dir)
+            if input_dir_path.name == 'raw_inputs' and input_dir_path.parent.name.startswith('run-'):
+                run_folder = input_dir_path.parent
+            else:
+                run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             if Path("outputs").exists():
                 run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
                 if run_folders:
@@ -2158,8 +2259,13 @@ if __name__ == '__main__':
             print_stage_status(run_folder, args.stage_status)
             exit(0)
         input_dir = Path(args.input_dir)
-        run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-        run_folder = Path('outputs') / f'run-{run_ts}'
+        # PATCH: Use run_folder from yt-dlp patch if set, else create new
+        input_dir_path = Path(args.input_dir)
+        if input_dir_path.name == 'raw_inputs' and input_dir_path.parent.name.startswith('run-'):
+            run_folder = input_dir_path.parent
+        else:
+            run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+            run_folder = Path('outputs') / f'run-{run_ts}'
         print(f"🆕 Starting fresh run: {run_folder}")
         orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
         jobs = create_jobs_from_input(input_dir)

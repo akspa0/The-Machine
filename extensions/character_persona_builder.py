@@ -3,14 +3,12 @@ import json
 import string
 from pathlib import Path
 from extension_base import ExtensionBase
-from llm_utils import run_llm_task
+from llm_utils import run_llm_task, split_into_chunks_advanced, recursive_summarize, default_llm_summarize_fn
 import argparse
+from pydub.utils import mediainfo
 from pydub import AudioSegment
-import re
-import sys
-sys.path.insert(0, str(Path(__file__).parent))
-from llm_tokenize import split_text_to_token_chunks
-from llm_summarize import summarize_chunks_with_llm
+import soundfile as sf
+import numpy as np
 
 """
 Usage:
@@ -23,137 +21,93 @@ Handles channel folders named with prefixes (e.g., 0000-conversation) and normal
 Outputs to <output_root>/characters/<call_title or call_id>/<channel or conversation_speaker>/.
 """
 
-# --- EMBEDDED SYSTEM PROMPT (Character.AI guidelines) ---
-CHARACTER_AI_GUIDELINES = r'''
-# Character.AI Creation Guidelines
+# Distilled Character.AI persona creation guidelines (from character_ai_guidelines.md and official docs)
+CHARACTER_AI_GUIDELINES = '''
+Character.AI Persona Creation Guidelines:
+- Fill out all core attributes: Name, Greeting, Short Description, Long Description, Suggested Starters, Categories.
+- Write a detailed Definition: include background, personality, quirks, and example dialogs.
+- Use the transcript and call synopsis below to infer the character's traits, style, and context.
+- Make the persona engaging, specific, and ready for use in Character.AI.
+- Example dialog should demonstrate the character's unique voice and behavior.
+- Use best practices: be specific, provide examples, create depth, and consider context.
+- Be concise and allow for absurdity to flow naturally in the persona.
+- Try to keep the entire response below 300 tokens.
+- Output in the following format:
 
-[...full content of character_ai_guidelines.md goes here...]
+Name: <Character Name>
+Short Description: <One-line description>
+Greeting: <Greeting message>
+Long Description: <Detailed background/personality>
+Suggested Starters:
+- <Starter 1>
+- <Starter 2>
+Categories: <comma-separated tags>
+Definition:
+<Freeform definition, including example dialogs and behavioral notes>
 '''
-
-LENNYBOT_STYLE_NOTE = (
-    "in the style and structure of the LennyBot example (do not copy its content, but use its format and level of detail)"
-)
-
-def find_channels(call_folder):
-    # Map actual subfolder name to normalized channel name
-    channel_map = {}
-    for d in call_folder.iterdir():
-        if not d.is_dir():
-            continue
-        if re.search(r'-left-vocals$', d.name):
-            channel_map[d.name] = 'left-vocals'
-        elif re.search(r'-right-vocals$', d.name):
-            channel_map[d.name] = 'right-vocals'
-        elif re.search(r'-conversation$', d.name):
-            channel_map[d.name] = 'conversation'
-    # Prefer left/right if both present
-    normalized = set(channel_map.values())
-    if 'left-vocals' in normalized and 'right-vocals' in normalized:
-        return {k: v for k, v in channel_map.items() if v in ['left-vocals', 'right-vocals']}
-    elif 'conversation' in normalized:
-        return {k: v for k, v in channel_map.items() if v == 'conversation'}
-    return {}
-
-def collect_utterances_merged(call_folder, channel_map):
-    # channel_map: {actual_folder: normalized_name}
-    utterances = {norm: [] for norm in set(channel_map.values())}
-    for actual, norm in channel_map.items():
-        channel_dir = call_folder / actual
-        if not channel_dir.exists():
-            continue
-        for speaker_folder in channel_dir.iterdir():
-            if not speaker_folder.is_dir() or not speaker_folder.name.startswith('S'):
-                continue
-            speaker_id = speaker_folder.name
-            for txt_file in speaker_folder.glob('*.txt'):
-                base = txt_file.stem
-                wav_file = txt_file.with_suffix('.wav')
-                json_file = txt_file.with_suffix('.json')
-                timestamp = None
-                if json_file.exists():
-                    try:
-                        with open(json_file, 'r', encoding='utf-8') as f:
-                            meta = json.load(f)
-                        timestamp = meta.get('start', None)
-                    except Exception:
-                        pass
-                if timestamp is None:
-                    parts = base.split('-')
-                    if len(parts) > 1 and parts[1].isdigit():
-                        timestamp = float(parts[1])
-                utter = {
-                    'channel': norm,
-                    'speaker_id': speaker_id,
-                    'txt_file': txt_file,
-                    'wav_file': wav_file if wav_file.exists() else None,
-                    'timestamp': timestamp,
-                    'text': txt_file.read_text(encoding='utf-8').strip()
-                }
-                utterances[norm].append(utter)
-    for norm in utterances:
-        utterances[norm].sort(key=lambda u: (u['timestamp'] if u['timestamp'] is not None else 0))
-    return utterances
-
-def collect_utterances_per_speaker(conversation_dir):
-    speakers = {}
-    for speaker_folder in conversation_dir.iterdir():
-        if not speaker_folder.is_dir() or not speaker_folder.name.startswith('S'):
-            continue
-        speaker_id = speaker_folder.name
-        for txt_file in speaker_folder.glob('*.txt'):
-            base = txt_file.stem
-            wav_file = txt_file.with_suffix('.wav')
-            json_file = txt_file.with_suffix('.json')
-            timestamp = None
-            if json_file.exists():
-                try:
-                    with open(json_file, 'r', encoding='utf-8') as f:
-                        meta = json.load(f)
-                    timestamp = meta.get('start', None)
-                except Exception:
-                    pass
-            if timestamp is None:
-                parts = base.split('-')
-                if len(parts) > 1 and parts[1].isdigit():
-                    timestamp = float(parts[1])
-            utter = {
-                'speaker_id': speaker_id,
-                'txt_file': txt_file,
-                'wav_file': wav_file if wav_file.exists() else None,
-                'timestamp': timestamp,
-                'text': txt_file.read_text(encoding='utf-8').strip()
-            }
-            speakers.setdefault(speaker_id, []).append(utter)
-    for spk in speakers:
-        speakers[spk].sort(key=lambda u: (u['timestamp'] if u['timestamp'] is not None else 0))
-    return speakers
-
-def create_audio_clips(utterances, out_dir, char_label):
-    wavs = [u['wav_file'] for u in utterances if u['wav_file'] is not None]
-    if not wavs:
-        return []
-    combined = AudioSegment.empty()
-    for wav in wavs:
-        try:
-            seg = AudioSegment.from_wav(wav)
-            combined += seg
-        except Exception:
-            continue
-    durations = [15, 30, 60]
-    outputs = []
-    for sec in durations:
-        if len(combined) == 0:
-            break
-        clip = combined[:sec*1000]
-        out_mp3 = out_dir / f"{char_label}_{sec}s.mp3"
-        clip.export(out_mp3, format="mp3")
-        outputs.append(out_mp3)
-    return outputs
 
 def sanitize_title(title):
     title = title.translate(str.maketrans('', '', string.punctuation))
     title = '_'.join(title.strip().split())
     return title[:48] or None
+
+def create_audio_clips(wav_files, out_dir, speaker_id):
+    # Only use original high-quality .wav files (not *_16k.wav)
+    wavs = sorted([w for w in wav_files if w.exists() and not w.name.endswith('_16k.wav')], key=lambda x: x.name)
+    if not wavs:
+        print(f"[WARN] No high-quality .wav files found for {speaker_id}, skipping audio sample generation.")
+        return []
+    else:
+        print(f"[AUDIO SAMPLE] Using files for {speaker_id}: {[w.name for w in wavs]}")
+    arrays = []
+    sample_rate = None
+    total_samples = 0
+    for wav in wavs:
+        try:
+            data, sr = sf.read(str(wav))
+            print(f"[AUDIO SAMPLE] {wav.name}: sr={sr}, shape={data.shape}, dtype={data.dtype}")
+            if sample_rate is None:
+                sample_rate = sr
+            elif sr != sample_rate:
+                print(f"[ERROR] Sample rate mismatch: {wav.name} is {sr} Hz, expected {sample_rate} Hz. Skipping.")
+                continue
+            arrays.append(data)
+            total_samples += data.shape[0]
+            if total_samples / sample_rate >= 30:
+                break
+        except Exception as e:
+            print(f"[ERROR] Could not read {wav.name}: {e}")
+            continue
+    if not arrays:
+        print(f"[WARN] No valid segments found for {speaker_id} after filtering.")
+        return []
+    combined = np.concatenate(arrays, axis=0)
+    outputs = []
+    for sec in [15, 30]:
+        num_samples = int(sec * sample_rate)
+        clip = combined[:num_samples]
+        if clip.shape[0] == 0:
+            continue
+        out_wav = out_dir / f"{speaker_id}_{sec}s.wav"
+        sf.write(str(out_wav), clip, sample_rate)
+        print(f"[AUDIO SAMPLE] {out_wav}: sr={sample_rate}, shape={clip.shape}, dtype={clip.dtype}, size={out_wav.stat().st_size} bytes")
+        outputs.append(str(out_wav))
+        # Optional: convert to MP3 using ffmpeg (if needed)
+        try:
+            import subprocess
+            out_mp3 = out_dir / f"{speaker_id}_{sec}s.mp3"
+            cmd = [
+                "ffmpeg", "-y", "-i", str(out_wav),
+                "-ar", str(sample_rate), "-acodec", "libmp3lame", "-b:a", "320k", str(out_mp3)
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            print(f"[AUDIO SAMPLE] {out_mp3}: (converted from WAV)")
+            outputs.append(str(out_mp3))
+        except Exception as e:
+            print(f"[AUDIO SAMPLE] Could not convert to MP3: {e}")
+    if combined.shape[0] < 15000:
+        print(f"[WARN] Only {combined.shape[0]/sample_rate:.2f}s audio available for {speaker_id}, samples may be short.")
+    return outputs
 
 class CharacterPersonaBuilder(ExtensionBase):
     def __init__(self, output_root, llm_config_path=None, max_tokens=4096):
@@ -189,114 +143,118 @@ class CharacterPersonaBuilder(ExtensionBase):
                 return sanitized
         return call_id
 
-    def generate_persona(self, persona_input):
-        # If input is too long, chunk and summarize
-        # Always use a tiktoken-supported encoding for chunking
-        chunks = split_text_to_token_chunks(persona_input, max_tokens=self.max_tokens, model='gpt-3.5-turbo')
-        responses = []
-        for chunk in chunks:
-            response = run_llm_task(chunk, self.llm_config, single_output=True, chunking=False)
-            responses.append(response.strip())
-        if len(responses) > 1:
-            summary = summarize_chunks_with_llm(responses, self.llm_config)
-            return summary
+    def build_user_prompt(self, transcript, call_synopsis=None):
+        lines = [l for l in transcript.strip().splitlines() if l.strip()]
+        if len(lines) > 5:
+            prompt = '[SPEAKER TRANSCRIPT]\n' + transcript.strip()
+            self.log(f"[PROMPT] Using transcript only ({len(lines)} lines), omitting call_synopsis.")
         else:
-            return responses[0]
+            prompt = '[SPEAKER TRANSCRIPT]\n' + transcript.strip()
+            if call_synopsis:
+                prompt += '\n\n[CALL SYNOPSIS]\n' + call_synopsis.strip()
+                self.log(f"[PROMPT] Using transcript + call_synopsis (only {len(lines)} lines).")
+            else:
+                self.log(f"[PROMPT] Using transcript only (≤5 lines, no call_synopsis available).")
+        return prompt
+
+    def generate_persona(self, system_prompt, user_prompt, out_dir=None):
+        # Log and save both system and user prompts
+        self.log(f"[SYSTEM PROMPT] (truncated for display) {system_prompt[:500]}... (truncated)")
+        self.log(f"[USER PROMPT] (truncated for display) {user_prompt[:500]}... (truncated)")
+        if out_dir is not None:
+            (out_dir / 'persona_system_prompt.txt').write_text(system_prompt, encoding='utf-8')
+            (out_dir / 'persona_user_prompt.txt').write_text(user_prompt, encoding='utf-8')
+        # Call LLM with system prompt and user prompt
+        # Here we assume run_llm_task supports system/user separation; if not, concatenate as fallback
+        try:
+            response = run_llm_task(user_prompt, self.llm_config, system_prompt=system_prompt, single_output=True, chunking=False)
+        except TypeError:
+            # Fallback: concatenate system and user prompt if system_prompt arg not supported
+            response = run_llm_task(system_prompt + '\n\n' + user_prompt, self.llm_config, single_output=True, chunking=False)
+        persona = response.strip()
+        self.log(f"[LLM RESPONSE] (truncated for display) {persona[:500]}... (truncated)")
+        if out_dir is not None:
+            (out_dir / 'persona_llm_response.txt').write_text(persona, encoding='utf-8')
+        return persona
 
     def run(self):
         speakers_root = self.output_root / 'speakers'
         characters_root = self.output_root / 'characters'
         characters_root.mkdir(exist_ok=True)
+        llm_root = self.output_root / 'llm'
         if not speakers_root.exists():
             self.log("No speakers directory found.")
             return
-        callid_to_title = {}
         persona_manifest = []
         for call_folder in speakers_root.iterdir():
             if not call_folder.is_dir():
                 continue
             call_id = call_folder.name
             call_title = self.get_call_title(call_id)
-            callid_to_title[call_id] = call_title
-            self.log(f"Processing call: {call_id} (title: {call_title})")
-            channel_map = find_channels(call_folder)
-            self.log(f"Channel folder mapping for {call_id}: {channel_map}")
-            if not channel_map:
-                self.log(f"No valid channels for {call_id}")
-                continue
-            call_characters_dir = characters_root / call_id
-            call_characters_dir.mkdir(parents=True, exist_ok=True)
-            # If only conversation, process per speaker
-            if set(channel_map.values()) == {"conversation"}:
-                for actual, norm in channel_map.items():
-                    conversation_dir = call_folder / actual
-                    speakers = collect_utterances_per_speaker(conversation_dir)
-                    for speaker_id, utts in speakers.items():
-                        if not utts:
-                            self.log(f"No utterances for {speaker_id} in {call_id}")
-                            continue
-                        transcript_lines = []
-                        for u in utts:
-                            ts = f"{u['timestamp']:.2f}" if u['timestamp'] is not None else "?"
-                            transcript_lines.append(f"[{ts}] {u['text']}")
-                        transcript = '\n'.join(transcript_lines)
-                        out_dir = call_characters_dir / speaker_id
-                        out_dir.mkdir(parents=True, exist_ok=True)
-                        transcript_path = out_dir / 'speaker_transcript.txt'
-                        transcript_path.write_text(transcript, encoding='utf-8')
-                        persona_input = transcript
-                        persona_text = self.generate_persona(persona_input)
-                        persona_path = out_dir / 'persona.md'
-                        persona_path.write_text(persona_text, encoding='utf-8')
-                        audio_clips = create_audio_clips(utts, out_dir, speaker_id)
-                        # Collect all .wav files for this speaker
-                        source_audio_paths = [str(u['wav_file']) for u in utts if u['wav_file'] is not None]
-                        persona_manifest.append({
-                            'call_id': call_id,
-                            'speaker': speaker_id,
-                            'persona_path': str(persona_path),
-                            'source_audio_paths': source_audio_paths
-                        })
-                        self.log(f"Wrote persona, transcript, and {len(audio_clips)} audio clips for {speaker_id} in {call_id} to {out_dir}")
-            else:
-                # Merge all speakers per channel
-                utterances_by_channel = collect_utterances_merged(call_folder, channel_map)
-                for norm, utts in utterances_by_channel.items():
-                    if not utts:
-                        self.log(f"No utterances for {norm} in {call_id}")
+            for channel_folder in call_folder.iterdir():
+                if not channel_folder.is_dir():
+                    continue
+                channel = channel_folder.name
+                for speaker_folder in channel_folder.iterdir():
+                    if not speaker_folder.is_dir() or not speaker_folder.name.startswith('S'):
                         continue
-                    transcript_lines = []
-                    for u in utts:
-                        ts = f"{u['timestamp']:.2f}" if u['timestamp'] is not None else "?"
-                        transcript_lines.append(f"[{ts}][{u['speaker_id']}] {u['text']}")
-                    transcript = '\n'.join(transcript_lines)
-                    out_dir = call_characters_dir / norm
+                    speaker_id = speaker_folder.name
+                    transcript_path = speaker_folder / 'speaker_transcript.txt'
+                    if not transcript_path.exists():
+                        self.log(f"[SKIP] {transcript_path} does not exist, skipping.")
+                        continue
+                    transcript_bytes = transcript_path.stat().st_size
+                    if transcript_bytes < 300:
+                        self.log(f"[SKIP] {transcript_path} is only {transcript_bytes} bytes (<300), skipping persona generation.")
+                        continue
+                    transcript = transcript_path.read_text(encoding='utf-8').strip()
+                    # Sum durations of all .wav files for this speaker
+                    wav_files = list(speaker_folder.glob('*.wav'))
+                    total_duration = 0.0
+                    for wav_file in wav_files:
+                        try:
+                            info = mediainfo(str(wav_file))
+                            duration = float(info.get('duration', 0))
+                            total_duration += duration
+                        except Exception:
+                            pass
+                    if total_duration < 15.0:
+                        self.log(f"[SKIP] {speaker_folder} has only {total_duration:.2f}s audio (<15s), skipping persona generation.")
+                        continue
+                    # Compose user prompt: transcript + call synopsis (if available)
+                    call_synopsis_path = llm_root / call_id / 'call_synopsis.txt'
+                    call_synopsis = call_synopsis_path.read_text(encoding='utf-8').strip() if call_synopsis_path.exists() else None
+                    user_prompt = self.build_user_prompt(transcript, call_synopsis)
+                    out_dir = characters_root / call_id / channel / speaker_id
                     out_dir.mkdir(parents=True, exist_ok=True)
-                    transcript_path = out_dir / 'channel_transcript.txt'
-                    transcript_path.write_text(transcript, encoding='utf-8')
-                    persona_input = transcript
-                    persona_text = self.generate_persona(persona_input)
+                    out_transcript_path = out_dir / 'speaker_transcript.txt'
+                    out_transcript_path.write_text(transcript, encoding='utf-8')
+                    persona_text = self.generate_persona(CHARACTER_AI_GUIDELINES, user_prompt, out_dir=out_dir)
                     persona_path = out_dir / 'persona.md'
                     persona_path.write_text(persona_text, encoding='utf-8')
-                    audio_clips = create_audio_clips(utts, out_dir, norm)
-                    # Collect all .wav files for this channel
-                    source_audio_paths = [str(u['wav_file']) for u in utts if u['wav_file'] is not None]
+                    # Create audio samples (15s, 30s)
+                    audio_samples = create_audio_clips(wav_files, out_dir, speaker_id)
+                    if audio_samples:
+                        self.log(f"[OK] Created audio samples for {speaker_id} in {call_id}/{channel}: {audio_samples}")
+                    else:
+                        self.log(f"[WARN] No audio samples created for {speaker_id} in {call_id}/{channel}")
                     persona_manifest.append({
                         'call_id': call_id,
-                        'speaker': norm,
+                        'channel': channel,
+                        'speaker': speaker_id,
                         'persona_path': str(persona_path),
-                        'source_audio_paths': source_audio_paths
+                        'source_audio_paths': [str(w) for w in wav_files if w.exists()],
+                        'audio_samples': audio_samples
                     })
-                    self.log(f"Wrote persona, transcript, and {len(audio_clips)} audio clips for {norm} in {call_id} to {out_dir}")
+                    self.log(f"[OK] Persona, transcript for {speaker_id} in {call_id}/{channel} written to {out_dir}")
         # Write persona manifest
         manifest_path = characters_root / 'persona_manifest.json'
         with open(manifest_path, 'w', encoding='utf-8') as f:
             json.dump(persona_manifest, f, indent=2)
         self.log(f"Persona manifest written to {manifest_path}")
-        self.log(f"Call ID to Title mapping: {json.dumps(callid_to_title, indent=2)}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Character Persona Builder Extension")
+    parser = argparse.ArgumentParser(description="Character Persona Builder Extension (refactored)")
     parser.add_argument('output_root', type=str, help='Root output folder (parent of speakers/)')
     parser.add_argument('--llm-config', type=str, default=None, help='Path to LLM config JSON (default: workflows/llm_tasks.json)')
     parser.add_argument('--max-tokens', type=int, default=4096, help='Max tokens per LLM chunk (default: 4096, max: 8192).')

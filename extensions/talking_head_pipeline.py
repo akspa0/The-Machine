@@ -2,6 +2,8 @@ import subprocess
 from pathlib import Path
 import argparse
 import json
+# If LLM chunking/tokenization is needed, import from llm_utils
+# from llm_utils import split_into_chunks_advanced
 
 def run_persona_builder(output_root, llm_config=None):
     cmd = ["python", "character_persona_builder.py", str(output_root)]

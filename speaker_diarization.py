@@ -10,6 +10,8 @@ from pyannote.audio import Pipeline
 import torch
 import torchaudio
 from pyannote.audio.pipelines.utils.hook import ProgressHook
+# If LLM chunking/tokenization is needed, import from llm_utils
+# from llm_utils import split_into_chunks_advanced
 
 # --- CONFIGURATION ---
 MODEL_ID = "pyannote/speaker-diarization-3.1"

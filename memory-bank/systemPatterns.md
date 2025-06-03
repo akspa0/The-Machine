@@ -30,6 +30,11 @@ Documents the system architecture, key technical decisions, design patterns, and
 - **Privacy-First:** No PII is ever logged or output; privacy is enforced at every stage.
 - **API-Driven:** All file and job transfers to external tools are done via robust APIs, never direct file system access.
 - **Database Integration (Planned):** All jobs, files, and metadata will be referenceable and queryable via a database registry.
+- **New:** Audio file validation is performed by duration (≥10s) before separation, with pre-processing and logging of file validity. Metadata from single-file inputs is transferred to output soundbites during finalization.
+- **All LLM chunking, tokenization, and summarization logic is unified in `extensions/llm_utils.py`.**
+- **All scripts/extensions import from this single utility; redundant scripts have been removed.**
+- **CLI entry points for chunking/summarization are now via `llm_utils.py`.**
+- **All extensions remain independently runnable and functional.**
 
 ## Component Relationships
 

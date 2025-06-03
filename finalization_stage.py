@@ -616,4 +616,18 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                     # Retrieve start/end time for the soundbite (if available)
                     start_time = start
                     end_time = end
-                    embed_lineage_id3(mp3_path, original_title, start_time, end_time) 
+                    embed_lineage_id3(mp3_path, original_title, start_time, end_time)
+                    # --- Tag writing fix: collect extra tags and use embed_id3 ---
+                    extra_tags = {}
+                    if 'artist' in locals():
+                        extra_tags['artist'] = artist
+                    if 'album' in locals():
+                        extra_tags['album'] = album
+                    if 'title' in locals():
+                        extra_tags['title'] = title
+                    if 'comment' in locals():
+                        extra_tags['comment'] = comment
+                    if 'composer' in locals():
+                        extra_tags['composer'] = composer
+                    if extra_tags:
+                        embed_id3(mp3_path, extra_tags) 

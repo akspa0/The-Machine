@@ -28,20 +28,24 @@ def separate_audio_file(input_file: Path, output_root: Path, model_path: str) ->
     """
     Run audio-separator on a single file. Moves/renames outputs to a clean structure.
     Returns a dict with status, output stems, and errors.
+    If the filename matches the anonymized pattern, use pipeline logic.
+    If not, treat as a single-file input: use base name as call_id, 'out' as channel.
     """
     call_id, channel, timestamp = parse_anonymized_filename(input_file.name)
+    single_file_mode = False
     if not call_id or not channel:
-        return {
-            'input_name': input_file.name,
-            'output_stems': [],
-            'separation_status': 'failed',
-            'stderr': 'Could not parse input filename',
-            'returncode': 1
-        }
-    call_dir = output_root / call_id
+        # Fallback: single-file mode
+        single_file_mode = True
+        call_id = input_file.stem  # base name without extension
+        channel = 'out'
+        timestamp = None
+    if single_file_mode:
+        call_dir = output_root
+    else:
+        call_dir = output_root / call_id
     call_dir.mkdir(exist_ok=True)
     # Use a temp subdir for audio-separator output
-    temp_out = call_dir / f'_tmp_{channel}'
+    temp_out = call_dir / (f'_tmp_{channel}' if not single_file_mode else '_tmp_out')
     temp_out.mkdir(exist_ok=True)
     cmd = [
         'audio-separator',
@@ -56,10 +60,16 @@ def separate_audio_file(input_file: Path, output_root: Path, model_path: str) ->
     result = subprocess.run(cmd, capture_output=True, text=True)
     stems = []
     # Map from audio-separator output to our desired names
-    stem_map = {
-        'Vocals': f'{channel}-vocals.wav',
-        'Instrumental': f'{channel}-instrumental.wav'
-    }
+    if single_file_mode:
+        stem_map = {
+            'Vocals': f'{call_id}-vocals.wav',
+            'Instrumental': f'{call_id}-instrumental.wav'
+        }
+    else:
+        stem_map = {
+            'Vocals': f'{channel}-vocals.wav',
+            'Instrumental': f'{channel}-instrumental.wav'
+        }
     found = 0
     for stem_type, out_name in stem_map.items():
         # Find the file matching the pattern
