@@ -44,7 +44,7 @@ def generate_per_speaker_transcripts(speakers_root, force=False):
                     else:
                         print(f"[FORCE] Overwriting {transcript_path}.")
                 # Gather all .txt files for this speaker only (never mix channels or calls)
-                txt_files = sorted(speaker_folder.glob('*.txt'))
+                txt_files = sorted(f for f in speaker_folder.glob('*.txt') if f.name != 'speaker_transcript.txt')
                 lines = []
                 for txt_file in txt_files:
                     content = txt_file.read_text(encoding='utf-8').strip()
