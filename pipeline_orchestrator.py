@@ -2068,6 +2068,13 @@ if __name__ == '__main__':
         # Set input_dir to raw_inputs_dir for downstream processing
         args.input_dir = str(raw_inputs_dir)
 
+    # --- PATCH: If input_dir is outputs/run-XXXXXX/raw_inputs, use parent run- folder for all processing ---
+    from pathlib import Path
+    input_dir_path = Path(args.input_dir) if args.input_dir else None
+    if input_dir_path and input_dir_path.name == 'raw_inputs' and input_dir_path.parent.name.startswith('run-'):
+        run_folder = input_dir_path.parent
+        print(f"[PATCH] Using existing run folder from yt-dlp: {run_folder}")
+
     # Handle --force logic
     if args.output_folder and args.resume_from and args.force:
         # Clear state and delete outputs from the specified stage forward
@@ -2213,7 +2220,12 @@ if __name__ == '__main__':
             exit(1)
         if args.show_resume_status:
             from resume_utils import print_resume_status
-            run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            # PATCH: Use run_folder from yt-dlp patch if set, else create new
+            input_dir_path = Path(args.input_dir)
+            if input_dir_path.name == 'raw_inputs' and input_dir_path.parent.name.startswith('run-'):
+                run_folder = input_dir_path.parent
+            else:
+                run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             if Path("outputs").exists():
                 run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
                 if run_folders:
@@ -2222,7 +2234,12 @@ if __name__ == '__main__':
             exit(0)
         if args.stage_status:
             from resume_utils import print_stage_status
-            run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            # PATCH: Use run_folder from yt-dlp patch if set, else create new
+            input_dir_path = Path(args.input_dir)
+            if input_dir_path.name == 'raw_inputs' and input_dir_path.parent.name.startswith('run-'):
+                run_folder = input_dir_path.parent
+            else:
+                run_folder = Path("outputs") / f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             if Path("outputs").exists():
                 run_folders = [d for d in Path("outputs").iterdir() if d.is_dir() and d.name.startswith("run-")]
                 if run_folders:
@@ -2230,8 +2247,13 @@ if __name__ == '__main__':
             print_stage_status(run_folder, args.stage_status)
             exit(0)
         input_dir = Path(args.input_dir)
-        run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-        run_folder = Path('outputs') / f'run-{run_ts}'
+        # PATCH: Use run_folder from yt-dlp patch if set, else create new
+        input_dir_path = Path(args.input_dir)
+        if input_dir_path.name == 'raw_inputs' and input_dir_path.parent.name.startswith('run-'):
+            run_folder = input_dir_path.parent
+        else:
+            run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+            run_folder = Path('outputs') / f'run-{run_ts}'
         print(f"🆕 Starting fresh run: {run_folder}")
         orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
         jobs = create_jobs_from_input(input_dir)
