@@ -146,7 +146,24 @@ class PipelineOrchestrator:
         
         # Handle traditional left/right files that need separation
         for file in renamed_dir.iterdir():
-            if file.is_file() and ('-left-' in file.name or '-right-' in file.name):
+            if not file.is_file():
+                continue
+            # Skip files smaller than 200KB
+            if file.stat().st_size < 200 * 1024:
+                self.log_event('INFO', 'file_skipped_too_small', {
+                    'input_name': file.name,
+                    'size_bytes': file.stat().st_size,
+                    'message': 'File skipped for separation: smaller than 200KB'
+                })
+                continue
+            # Skip files starting with 'out-'
+            if file.name.startswith('out-'):
+                self.log_event('INFO', 'file_skipped_out_prefix', {
+                    'input_name': file.name,
+                    'message': "File skipped for separation: starts with 'out-'"
+                })
+                continue
+            if ('-left-' in file.name or '-right-' in file.name):
                 job_data = {
                     'input_path': str(file),
                     'input_name': file.name
@@ -1194,7 +1211,7 @@ class PipelineOrchestrator:
     def run_true_peak_normalization_stage(self):
         """
         Apply true peak normalization to prevent digital clipping on normalized vocals.
-        Uses -1.0 dBTP (decibels True Peak) limit which is broadcast standard.
+        Uses -6.0 dBTP (decibels True Peak) limit which is broadcast standard.
         Logs every file written and updates manifest.
         """
         import pyloudnorm as pyln
