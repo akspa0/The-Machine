@@ -158,7 +158,12 @@ class PipelineOrchestrator:
         # Handle single files (complete conversations) - skip separation, prepare for diarization
         for file in renamed_dir.iterdir():
             if file.is_file() and not ('-left-' in file.name or '-right-' in file.name):
-                duration = file_durations.get(file.name)
+                # Calculate duration directly
+                try:
+                    info = sf.info(str(file))
+                    duration = info.duration
+                except Exception:
+                    duration = None
                 if duration is None or duration < 10.0:
                     self.log_event('INFO', 'file_skipped_too_short', {
                         'input_name': file.name,

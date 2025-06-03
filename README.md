@@ -37,6 +37,10 @@ The-Machine is a powerful, extensible toolkit for:
 - 🏗️ **Ready for Dataset Prep**: Designed to help you build, clean, and annotate audio datasets for ML/AI.
 - 🔄 **Resume & Robustness**: Pipeline can resume from any stage, with full error recovery and validation.
 - 🧬 **Designed for Extensibility**: Build your own extensions to add new context, analysis, or creative outputs.
+- Persona builder audio samples are now lossless, using numpy+soundfile to concatenate original .wav files (not _16k.wav), with no resampling or pydub, guaranteeing high fidelity for all persona samples.
+- System prompt for persona generation now instructs the LLM to be concise, allow for absurdity, and keep responses below 300 tokens.
+- All LLM chunking/continuation logic is removed; only direct responses are used for persona and all LLM tasks.
+- Logging and debug output is robust and clear for all pipeline and extension stages.
 
 ---
 
