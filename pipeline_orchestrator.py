@@ -574,22 +574,20 @@ class PipelineOrchestrator:
 
     def run_final_soundbite_stage(self):
         """
-        Copy and rename valid soundbites from speakers/ to soundbites/ folder, using <index>-<short_transcription>.* naming.
-        Only includes valid soundbites (with transcript and duration >= 1s).
-        Formats master transcript as [CHANNEL][SpeakerXX][start-end]: Transcription.
-        Also generates new segment logs in soundbites/<call_id>/<channel>/ with transcript text.
-        The master transcript for each call is the canonical input for LLM tasks.
-        Integrates CLAP events with confidence >= 0.90 as [CLAP][start-end]: <label> (high confidence), sorted chronologically.
-        Logs every file written and updates manifest.
-        Filters out malformed segment entries.
+        Cut and export valid soundbites from true peak normalized vocals (preferred) or normalized as fallback.
+        Use segment start/end times to extract from the correct file.
+        Log source, sample rate, dtype, and output file for each soundbite.
+        Update manifest with true source.
         """
-        import shutil
         import json
+        import numpy as np
+        import soundfile as sf
+        from collections import defaultdict
         speakers_dir = self.run_folder / 'speakers'
-        separated_dir = self.run_folder / 'separated'
         soundbites_dir = self.run_folder / 'soundbites'
         soundbites_dir.mkdir(exist_ok=True)
-        from collections import defaultdict
+        true_peak_dir = self.run_folder / 'true_peak_normalized'
+        normalized_dir = self.run_folder / 'normalized'
         segments = [entry for entry in self.manifest if entry.get('stage') == 'speaker_segmented']
         calls = defaultdict(list)
         for seg in segments:
@@ -613,11 +611,9 @@ class PipelineOrchestrator:
                                 'confidence': event.get('confidence'),
                                 'channel': channel
                             })
-            # Determine what channels are present
             present_channels = set(s.get('channel', '') for s in segs)
             has_tuple = any(c in ['left-vocals', 'right-vocals'] for c in present_channels)
             has_conversation = any('conversation' in c for c in present_channels)
-            # Filter segs: if tuple channels exist, only process those; else, process conversation channels
             valid_segs = []
             for s in segs:
                 if s.get('call_id') != call_id:
@@ -628,7 +624,6 @@ class PipelineOrchestrator:
                         self.log_event('WARNING', 'skipped_non_tuple_channel_segment', {'call_id': call_id, 'channel': channel, 'segment': s})
                         continue
                 else:
-                    # Accept conversation/mono channels
                     if 'conversation' not in channel:
                         self.log_event('WARNING', 'skipped_non_conversation_channel_segment', {'call_id': call_id, 'channel': channel, 'segment': s})
                         continue
@@ -657,57 +652,97 @@ class PipelineOrchestrator:
                     continue
                 if channel in ['left-vocals', 'right-vocals']:
                     channel_fmt = f"[{channel.replace('-vocals','').upper()}]"
+                    # True peak normalized file path
+                    tp_path = true_peak_dir / call_id / f"{channel}.wav"
+                    norm_path = normalized_dir / call_id / f"{channel}.wav"
                 else:
                     channel_fmt = "[CONVERSATION]"
-                spk_num = ''.join(filter(str.isdigit, speaker))
-                spk_fmt = f"[Speaker{int(spk_num):02d}]" if spk_num else f"[{speaker}]"
-                spk_dir = speakers_dir / call_id / channel / speaker
-                base_index = f"{idx:04d}"
-                orig_wav = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.wav')), None)
-                orig_txt = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.txt')), None)
-                orig_json = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.json')), None)
-                out_dir = soundbites_dir / call_id / channel / speaker
-                out_dir.mkdir(parents=True, exist_ok=True)
-                out_base = f"{idx:04d}-{self.sanitize(transcript)}"
-                out_wav = out_dir / (out_base + '.wav')
-                out_txt = out_dir / (out_base + '.txt') if orig_txt else None
-                out_json = out_dir / (out_base + '.json') if orig_json else None
-                if orig_wav and os.path.exists(orig_wav):
-                    shutil.copy2(orig_wav, out_wav)
-                if orig_txt and os.path.exists(orig_txt) and out_txt:
-                    shutil.copy2(orig_txt, out_txt)
-                if orig_json and os.path.exists(orig_json) and out_json:
-                    shutil.copy2(orig_json, out_json)
-                self.log_and_manifest(
-                    stage='final_soundbite',
-                    call_id=call_id,
-                    input_files=[str(orig_wav), str(orig_txt) if orig_txt else None, str(orig_json) if orig_json else None],
-                    output_files=[str(out_wav), str(out_txt) if out_txt else None, str(out_json) if out_json else None],
-                    params={'channel': channel, 'speaker': speaker},
-                    metadata={'duration': duration},
-                    event='file_written',
-                    result='success'
-                )
-                manifest_entry = dict(seg)
-                manifest_entry['stage'] = 'final_soundbite'
-                manifest_entry['soundbite_wav'] = str(out_wav)
-                manifest_entry['transcript'] = transcript
-                manifest_entry['txt'] = str(out_txt) if out_txt else None
-                manifest_entry['json'] = str(out_json) if out_json else None
-                self.manifest.append(manifest_entry)
-                call_soundbites.append({
-                    'channel_fmt': channel_fmt,
-                    'spk_fmt': spk_fmt,
-                    'start': start,
-                    'end': end,
-                    'transcript': transcript
-                })
-                channel_segments[channel].append({
-                    'speaker': speaker,
-                    'start': start,
-                    'end': end,
-                    'transcript': transcript
-                })
+                    tp_path = true_peak_dir / call_id / f"{call_id}-conversation.wav"
+                    norm_path = normalized_dir / call_id / f"{call_id}-conversation.wav"
+                # Choose source file
+                src_path = None
+                src_type = None
+                if tp_path.exists():
+                    src_path = tp_path
+                    src_type = 'true_peak_normalized'
+                elif norm_path.exists():
+                    src_path = norm_path
+                    src_type = 'normalized'
+                else:
+                    self.log_event('ERROR', 'no_normalized_source_for_soundbite', {'call_id': call_id, 'channel': channel, 'segment': seg})
+                    continue
+                # Cut segment
+                try:
+                    audio, sr = sf.read(str(src_path))
+                    start_frame = int(start * sr)
+                    end_frame = int(end * sr)
+                    segment_audio = audio[start_frame:end_frame]  # This preserves all channels
+                    out_dir = soundbites_dir / call_id / channel / speaker
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    out_base = f"{idx:04d}-{self.sanitize(transcript)}"
+                    out_wav = out_dir / (out_base + '.wav')
+                    sf.write(str(out_wav), segment_audio, sr)
+                    # Logging
+                    self.log_event('INFO', 'soundbite_cut', {
+                        'call_id': call_id,
+                        'channel': channel,
+                        'speaker': speaker,
+                        'start': start,
+                        'end': end,
+                        'src_type': src_type,
+                        'src_path': str(src_path),
+                        'sample_rate': sr,
+                        'dtype': str(segment_audio.dtype) if hasattr(segment_audio, 'dtype') else str(type(segment_audio)),
+                        'output': str(out_wav)
+                    })
+                    # Copy transcript/json if available
+                    spk_dir = speakers_dir / call_id / channel / speaker
+                    base_index = f"{idx:04d}"
+                    orig_txt = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.txt')), None)
+                    orig_json = next((spk_dir / f for f in os.listdir(spk_dir) if f.startswith(base_index) and f.endswith('.json')), None)
+                    out_txt = out_dir / (out_base + '.txt') if orig_txt else None
+                    out_json = out_dir / (out_base + '.json') if orig_json else None
+                    if orig_txt and os.path.exists(orig_txt) and out_txt:
+                        import shutil
+                        shutil.copy2(orig_txt, out_txt)
+                    if orig_json and os.path.exists(orig_json) and out_json:
+                        import shutil
+                        shutil.copy2(orig_json, out_json)
+                    self.log_and_manifest(
+                        stage='final_soundbite',
+                        call_id=call_id,
+                        input_files=[str(src_path), str(orig_txt) if orig_txt else None, str(orig_json) if orig_json else None],
+                        output_files=[str(out_wav), str(out_txt) if out_txt else None, str(out_json) if out_json else None],
+                        params={'channel': channel, 'speaker': speaker, 'src_type': src_type},
+                        metadata={'duration': duration, 'sample_rate': sr},
+                        event='file_written',
+                        result='success'
+                    )
+                    manifest_entry = dict(seg)
+                    manifest_entry['stage'] = 'final_soundbite'
+                    manifest_entry['soundbite_wav'] = str(out_wav)
+                    manifest_entry['transcript'] = transcript
+                    manifest_entry['txt'] = str(out_txt) if out_txt else None
+                    manifest_entry['json'] = str(out_json) if out_json else None
+                    manifest_entry['src_type'] = src_type
+                    manifest_entry['src_path'] = str(src_path)
+                    self.manifest.append(manifest_entry)
+                    call_soundbites.append({
+                        'channel_fmt': channel_fmt,
+                        'spk_fmt': f"[Speaker{''.join(filter(str.isdigit, speaker)).zfill(2)}]" if ''.join(filter(str.isdigit, speaker)) else f"[{speaker}]",
+                        'start': start,
+                        'end': end,
+                        'transcript': transcript
+                    })
+                    channel_segments[channel].append({
+                        'speaker': speaker,
+                        'start': start,
+                        'end': end,
+                        'transcript': transcript
+                    })
+                except Exception as e:
+                    self.log_event('ERROR', 'soundbite_cut_failed', {'call_id': call_id, 'channel': channel, 'speaker': speaker, 'start': start, 'end': end, 'error': str(e)})
+                    continue
             all_events = [
                 {
                     'type': 'soundbite',
@@ -1101,16 +1136,19 @@ class PipelineOrchestrator:
                 continue
             call_norm_dir = normalized_dir / call_id
             call_norm_dir.mkdir(parents=True, exist_ok=True)
+            # Process tuple channels
             for channel in ['left-vocals', 'right-vocals']:
                 src = call_sep_dir / f"{channel}.wav"
                 if not src.exists():
                     continue
                 audio, sr = sf.read(str(src))
-                if audio.ndim > 1:
-                    audio = audio.mean(axis=1)
+                # Do NOT average to mono here; preserve original channel count
                 if sr != 44100:
                     import librosa
-                    audio = librosa.resample(audio, orig_sr=sr, target_sr=44100)
+                    if audio.ndim == 1:
+                        audio = librosa.resample(audio, orig_sr=sr, target_sr=44100)
+                    else:
+                        audio = librosa.resample(audio.T, orig_sr=sr, target_sr=44100).T
                     sr = 44100
                 loudness = meter.integrated_loudness(audio)
                 audio_norm = pyln.normalize.loudness(audio, loudness, -14.0)
@@ -1120,6 +1158,31 @@ class PipelineOrchestrator:
                     stage='normalized',
                     call_id=call_id,
                     input_files=[str(src)],
+                    output_files=[str(out_path)],
+                    params={'target_lufs': -14.0},
+                    metadata={'measured_lufs': loudness},
+                    event='file_written',
+                    result='success'
+                )
+            # Process conversation/mono files
+            for conv_file in call_sep_dir.glob('*-conversation.wav'):
+                audio, sr = sf.read(str(conv_file))
+                # Do NOT average to mono here; preserve original channel count
+                if sr != 44100:
+                    import librosa
+                    if audio.ndim == 1:
+                        audio = librosa.resample(audio, orig_sr=sr, target_sr=44100)
+                    else:
+                        audio = librosa.resample(audio.T, orig_sr=sr, target_sr=44100).T
+                    sr = 44100
+                loudness = meter.integrated_loudness(audio)
+                audio_norm = pyln.normalize.loudness(audio, loudness, -14.0)
+                out_path = call_norm_dir / conv_file.name
+                sf.write(str(out_path), audio_norm, sr)
+                self.log_and_manifest(
+                    stage='normalized',
+                    call_id=call_id,
+                    input_files=[str(conv_file)],
                     output_files=[str(out_path)],
                     params={'target_lufs': -14.0},
                     metadata={'measured_lufs': loudness},
@@ -1137,43 +1200,27 @@ class PipelineOrchestrator:
         import pyloudnorm as pyln
         import soundfile as sf
         from pathlib import Path
-        
         normalized_dir = self.run_folder / 'normalized'
         true_peak_dir = self.run_folder / 'true_peak_normalized'
         true_peak_dir.mkdir(exist_ok=True)
-        
         self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -3.0})
-        
         for call_id in os.listdir(normalized_dir):
             call_norm_dir = normalized_dir / call_id
             if not call_norm_dir.is_dir():
                 continue
-            
             call_tp_dir = true_peak_dir / call_id
             call_tp_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Process all vocal files (both traditional and conversation)
-            for vocal_file in call_norm_dir.glob('*.wav'):
-                src = vocal_file
-                dst = call_tp_dir / vocal_file.name
-                
+            # Process all .wav files (tuple and conversation)
+            for wav_file in call_norm_dir.glob('*.wav'):
+                src = wav_file
+                dst = call_tp_dir / wav_file.name
                 try:
                     audio, sr = sf.read(str(src))
-                    
-                    # Ensure mono for processing
-                    if audio.ndim > 1:
-                        audio = audio.mean(axis=1)
-                    
-                    # Apply true peak limiting to -3.0 dBTP
+                    # Do NOT average to mono here; preserve original channel count
                     meter = pyln.Meter(sr)
                     peak_normalized = pyln.normalize.peak(audio, -3.0)
-                    
-                    # Save the true peak normalized audio
                     sf.write(str(dst), peak_normalized, sr)
-                    
-                    # Calculate true peak level for logging
                     true_peak_db = 20 * np.log10(np.max(np.abs(peak_normalized)))
-                    
                     self.log_and_manifest(
                         stage='true_peak_normalized',
                         call_id=call_id,
@@ -1184,14 +1231,12 @@ class PipelineOrchestrator:
                         event='file_written',
                         result='success'
                     )
-                    
                 except Exception as e:
                     self.log_event('ERROR', 'true_peak_normalization_failed', {
                         'call_id': call_id,
-                        'file': vocal_file.name,
+                        'file': wav_file.name,
                         'error': str(e)
                     })
-        
         self.log_event('INFO', 'true_peak_normalization_complete', {'true_peak_dir': str(true_peak_dir)})
 
     def run_remix_stage(self, call_tones=False):
