@@ -521,6 +521,8 @@ class PipelineOrchestrator:
             success_count += 1
         self.log_event('INFO', 'transcription_complete', {'count': len(results), 'success': success_count, 'failed': fail_count, 'skipped': skip_count})
         print(f"[SUMMARY] Transcription: {success_count} succeeded, {fail_count} failed, {skip_count} skipped.")
+        # --- Write per-speaker transcripts after transcription ---
+        self.write_per_speaker_transcripts()
 
     @staticmethod
     def sanitize(text, max_words=12, max_length=40):
@@ -1135,7 +1137,7 @@ class PipelineOrchestrator:
         true_peak_dir = self.run_folder / 'true_peak_normalized'
         true_peak_dir.mkdir(exist_ok=True)
         
-        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -1.0})
+        self.log_event('INFO', 'true_peak_normalization_start', {'target_dbtp': -3.0})
         
         for call_id in os.listdir(normalized_dir):
             call_norm_dir = normalized_dir / call_id
@@ -1157,9 +1159,9 @@ class PipelineOrchestrator:
                     if audio.ndim > 1:
                         audio = audio.mean(axis=1)
                     
-                    # Apply true peak limiting to -1.0 dBTP
+                    # Apply true peak limiting to -3.0 dBTP
                     meter = pyln.Meter(sr)
-                    peak_normalized = pyln.normalize.peak(audio, -1.0)
+                    peak_normalized = pyln.normalize.peak(audio, -3.0)
                     
                     # Save the true peak normalized audio
                     sf.write(str(dst), peak_normalized, sr)
@@ -1172,7 +1174,7 @@ class PipelineOrchestrator:
                         call_id=call_id,
                         input_files=[str(src)],
                         output_files=[str(dst)],
-                        params={'target_dbtp': -1.0},
+                        params={'target_dbtp': -3.0},
                         metadata={'measured_true_peak_db': true_peak_db},
                         event='file_written',
                         result='success'
@@ -1749,6 +1751,46 @@ class PipelineOrchestrator:
                 if utterances:
                     transcripts[speaker_id] = '\n'.join(utterances)
         return transcripts
+
+    def write_per_speaker_transcripts(self):
+        """
+        For each speakers/<call_id>/<channel>/<speaker>/, concatenate all *.txt files in timestamp order into speaker_transcript.txt.
+        """
+        import glob
+        speakers_dir = self.run_folder / 'speakers'
+        for call_id_dir in speakers_dir.iterdir():
+            if not call_id_dir.is_dir():
+                continue
+            for channel_dir in call_id_dir.iterdir():
+                if not channel_dir.is_dir():
+                    continue
+                for speaker_dir in channel_dir.iterdir():
+                    if not speaker_dir.is_dir():
+                        continue
+                    txt_files = sorted(speaker_dir.glob('*.txt'))
+                    if not txt_files:
+                        continue
+                    # Sort by timestamp in filename if possible
+                    def extract_ts(f):
+                        parts = f.stem.split('-')
+                        if len(parts) > 1 and parts[1].isdigit():
+                            return int(parts[1])
+                        return 0
+                    txt_files = sorted(txt_files, key=extract_ts)
+                    lines = []
+                    for txt_file in txt_files:
+                        text = txt_file.read_text(encoding='utf-8').strip()
+                        if text:
+                            lines.append(text)
+                    if lines:
+                        out_path = speaker_dir / 'speaker_transcript.txt'
+                        out_path.write_text('\n'.join(lines), encoding='utf-8')
+                        self.log_event('INFO', 'wrote_per_speaker_transcript', {
+                            'call_id': call_id_dir.name,
+                            'channel': channel_dir.name,
+                            'speaker': speaker_dir.name,
+                            'output': str(out_path)
+                        })
 
 def create_jobs_from_input(input_path: Path) -> List[Job]:
     """Create jobs from input path (can be a single file or directory)
