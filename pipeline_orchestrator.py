@@ -1484,7 +1484,24 @@ class PipelineOrchestrator:
             return
         original_audio = input_files[0]
         print(f"[DEBUG] Using original audio for CLAP: {original_audio}")
-        # Run CLAP segmentation on original audio
+        # --- NEW: Run vocal separation on the single file ---
+        from audio_separation import separate_audio_file
+        separated_dir = self.run_folder / 'separated' / '0'
+        separated_dir.mkdir(parents=True, exist_ok=True)
+        sep_result = separate_audio_file(original_audio, separated_dir, 'mel_band_roformer_vocals_fv4_gabox.ckpt')
+        if sep_result['separation_status'] == 'failed':
+            print(f"[ERROR] Vocal separation failed: {sep_result.get('stderr', '')}")
+            return
+        # Use the vocals stem for all downstream steps
+        vocals_stem = None
+        for stem in sep_result['output_stems']:
+            if stem['stem_type'] == 'vocals':
+                vocals_stem = Path(stem['output_path'])
+                break
+        if not vocals_stem or not vocals_stem.exists():
+            print("[ERROR] No vocals stem found after separation.")
+            return
+        # Run CLAP segmentation on the vocals stem
         segmented_dir = self.run_folder / 'segmented'
         segmented_dir.mkdir(parents=True, exist_ok=True)
         from clap_annotation import segment_audio_with_clap
@@ -1493,32 +1510,31 @@ class PipelineOrchestrator:
         with open(segmentation_config_path, 'r', encoding='utf-8') as f:
             segmentation_config = json.load(f)["clap_segmentation"]
         segments = segment_audio_with_clap(
-            original_audio,
+            vocals_stem,
             segmentation_config,
             segmented_dir,
             model_id=segmentation_config.get("model_id", "laion/clap-htsat-unfused"),
             chunk_length_sec=segmentation_config.get("chunk_length_sec", 5),
             overlap_sec=segmentation_config.get("overlap_sec", 2)
         )
-        # If segments found, process each segment; else, process the whole file
+        # If segments found, process each segment; else, process the whole vocals stem
         files_to_process = []
         if segments:
             print(f"[DEBUG] CLAP segmentation found {len(segments)} segments.")
             for seg in segments:
                 files_to_process.append(Path(seg["output_path"]))
         else:
-            print("[DEBUG] No CLAP segments found; processing whole file.")
-            files_to_process = [original_audio]
-        # For each file (segment or whole), perform separation and downstream steps
+            print("[DEBUG] No CLAP segments found; processing whole vocals stem.")
+            files_to_process = [vocals_stem]
+        # For each file (segment or whole), perform downstream steps
         for idx, audio_file in enumerate(files_to_process):
             print(f"[DEBUG] Processing segment {idx}: {audio_file}")
-            # Place segment in a per-segment input folder for separation
             seg_input_dir = self.run_folder / 'segment_inputs' / f'segment_{idx:04d}'
             seg_input_dir.mkdir(parents=True, exist_ok=True)
             seg_audio_path = seg_input_dir / audio_file.name
             import shutil
             shutil.copy2(audio_file, seg_audio_path)
-            # Ingest segment as a job
+            # Ingest segment as a job (for manifest consistency, not used for separation)
             job = Job(job_id=f'segment_{idx:04d}', data={
                 'orig_path': str(seg_audio_path),
                 'base_name': seg_audio_path.name,
@@ -1530,32 +1546,11 @@ class PipelineOrchestrator:
                 'ext': seg_audio_path.suffix
             })
             self.jobs = [job]  # Overwrite jobs for this segment
-            self.add_separation_jobs()
-            self.run_audio_separation_stage()
+            # --- Downstream steps ---
+            # No separation needed, already have vocals
             self.run_normalization_stage()
             self.run_true_peak_normalization_stage()
-            # Use separated vocals for downstream steps
-            separated_dir = self.run_folder / 'separated' / f'{idx:04d}'
-            vocal_path = separated_dir / 'out-vocals.wav'
-            if not vocal_path.exists():
-                wavs = list(separated_dir.glob('*.wav'))
-                if not wavs:
-                    print(f"[ERROR] No separated vocals found for segment {idx}.")
-                    continue
-                vocal_path = wavs[0]
-            # Run CLAP annotation on the separated vocal (for context, not segmentation)
-            from clap_annotation import annotate_clap_for_out_files
-            clap_dir = self.run_folder / 'clap' / f'{idx:04d}'
-            annotate_clap_for_out_files(
-                input_dir=Path(vocal_path).parent,
-                output_dir=clap_dir,
-                prompts=segmentation_config.get("prompts", []),
-                model_id=segmentation_config.get("model_id", "laion/clap-htsat-unfused"),
-                chunk_length_sec=segmentation_config.get("chunk_length_sec", 5),
-                overlap_sec=segmentation_config.get("overlap_sec", 2),
-                confidence_threshold=segmentation_config.get("confidence_threshold", 0.6)
-            )
-            # Downstream steps
+            # Use normalized vocals for diarization, etc.
             self.run_diarization_stage()
             self.run_speaker_segmentation_stage()
             self.run_resample_segments_stage()

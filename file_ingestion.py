@@ -250,6 +250,11 @@ def process_file_job(job, run_folder: Path):
     job.data['original_title_for_id3'] = orig_name
     # Copy to raw_inputs (flat), but do NOT log anything
     dest_raw = raw_inputs_dir / base_name
+    if orig_path.resolve() == dest_raw.resolve():
+        # Source and destination are the same file; generate a unique name
+        unique_name = f"{Path(base_name).stem}_{uuid.uuid4().hex[:6]}{Path(base_name).suffix}"
+        dest_raw = raw_inputs_dir / unique_name
+        print(f"[WARN] Source and destination for raw_inputs are the same file. Renaming to {unique_name}.")
     try:
         shutil.copy2(orig_path, dest_raw)
     except Exception as e:
@@ -261,6 +266,11 @@ def process_file_job(job, run_folder: Path):
         file_type = job.data['file_type']
         new_name = f"{index_str}-{file_type}-{ts_str}{ext}"
         dest_renamed = renamed_dir / new_name
+        if dest_raw.resolve() == dest_renamed.resolve():
+            # Source and destination are the same file; generate a unique name
+            unique_name = f"{Path(new_name).stem}_{uuid.uuid4().hex[:6]}{Path(new_name).suffix}"
+            dest_renamed = renamed_dir / unique_name
+            print(f"[WARN] Source and destination for renamed are the same file. Renaming to {unique_name}.")
         try:
             shutil.copy2(dest_raw, dest_renamed)
             # Delete the file from raw_inputs after successful rename
@@ -268,31 +278,36 @@ def process_file_job(job, run_folder: Path):
                 dest_raw.unlink()
             except Exception as del_err:
                 return {'success': False, 'output_name': new_name, 'output_path': str(dest_renamed), 'error': f'File renamed but failed to delete raw_inputs file: {del_err}'}
-            job.data['output_name'] = new_name
+            job.data['output_name'] = dest_renamed.name
             job.data['output_path'] = str(dest_renamed)
             job.data['stage'] = 'renamed'
-            return {'success': True, 'output_name': new_name, 'output_path': str(dest_renamed), 'error': None}
+            return {'success': True, 'output_name': dest_renamed.name, 'output_path': str(dest_renamed), 'error': None}
         except Exception as e:
-            return {'success': False, 'output_name': new_name, 'output_path': str(dest_renamed), 'error': str(e)}
+            return {'success': False, 'output_name': dest_renamed.name, 'output_path': str(dest_renamed), 'error': str(e)}
     else:
         # Non-tuple file: apply same privacy rule, only log after renaming
         index_str = f"{job.data['tuple_index']:0{INDEX_PADDING}d}"
         ts_str = job.data['timestamp']
         new_name = f"{index_str}-single-{ts_str}{ext}"
         dest_renamed = renamed_dir / new_name
+        if dest_raw.resolve() == dest_renamed.resolve():
+            # Source and destination are the same file; generate a unique name
+            unique_name = f"{Path(new_name).stem}_{uuid.uuid4().hex[:6]}{Path(new_name).suffix}"
+            dest_renamed = renamed_dir / unique_name
+            print(f"[WARN] Source and destination for renamed are the same file. Renaming to {unique_name}.")
         try:
             shutil.copy2(dest_raw, dest_renamed)
             # Delete the file from raw_inputs after successful rename
             try:
                 dest_raw.unlink()
             except Exception as del_err:
-                return {'success': False, 'output_name': new_name, 'output_path': str(dest_renamed), 'error': f'File renamed but failed to delete raw_inputs file: {del_err}'}
-            job.data['output_name'] = new_name
+                return {'success': False, 'output_name': dest_renamed.name, 'output_path': str(dest_renamed), 'error': f'File renamed but failed to delete raw_inputs file: {del_err}'}
+            job.data['output_name'] = dest_renamed.name
             job.data['output_path'] = str(dest_renamed)
             job.data['stage'] = 'renamed'
-            return {'success': True, 'output_name': new_name, 'output_path': str(dest_renamed), 'error': None}
+            return {'success': True, 'output_name': dest_renamed.name, 'output_path': str(dest_renamed), 'error': None}
         except Exception as e:
-            return {'success': False, 'output_name': new_name, 'output_path': str(dest_renamed), 'error': str(e)}
+            return {'success': False, 'output_name': dest_renamed.name, 'output_path': str(dest_renamed), 'error': str(e)}
 
 def main():
     args = parse_args()
