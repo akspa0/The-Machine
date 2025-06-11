@@ -34,7 +34,7 @@ def detect_clap_events_wb(
     prompts: List[str],
     model_id: str = "laion/clap-htsat-fused",
     chunk_length_sec: float = 5.0,
-    threshold: float = 0.98,
+    threshold: float = 0.15,
     nms_gap_sec: float = 1.0,
 ) -> List[Dict]:
     """Re-implementation of WhisperBite's run_clap_event_detection().

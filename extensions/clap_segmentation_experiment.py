@@ -58,7 +58,7 @@ class ClapSegmentationExperiment(ExtensionBase):
         self,
         output_root,
         audio_file: Optional[str] = None,
-        confidence: float = 0.6,
+        confidence: float = 0.15,
         chunk_length_sec: int = 10,
         overlap_sec: int = 0,
         config_path: Optional[str] = None,
@@ -415,7 +415,7 @@ def main():
     parser = argparse.ArgumentParser(description="CLAP Segmentation Experiment Extension")
     parser.add_argument('output_root', type=str, help='Root output directory (outputs/run-*)')
     parser.add_argument('--audio-file', type=str, default=None, help='Optional: path to a single audio file to process')
-    parser.add_argument('--confidence', type=float, default=0.6, help='Confidence threshold for CLAP events')
+    parser.add_argument('--confidence', type=float, default=0.15, help='Confidence threshold for CLAP events')
     parser.add_argument('--chunk-length', type=int, default=10, help='Chunk length in seconds (default: 10)')
     parser.add_argument('--overlap', type=float, default=0.0, help='Overlap seconds between chunks.')
     parser.add_argument('--config', type=str, default=None, help='Path to clap_segmentation workflow JSON')

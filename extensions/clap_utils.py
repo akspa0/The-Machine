@@ -29,6 +29,7 @@ __all__ = [
     "segment_audio",
     "events_to_segments",
     "pair_alternating_prompt",
+    "pair_alternating_sets",
 ]
 
 # Default prompts that proved reliable in PoC
@@ -71,7 +72,7 @@ def detect_clap_events(
     model_id: str = "laion/clap-htsat-fused",
     chunk_length_sec: int = 10,
     overlap_sec: int = 0,
-    confidence_threshold: float = 0.6,
+    confidence_threshold: float = 0.15,
     similarity_metric: str = "sigmoid",  # "sigmoid" (prob) or "cosine"
     nms_gap_sec: float = 0.0,
     auto_calibrate_seconds: int | None = None,
@@ -557,4 +558,56 @@ def pair_alternating_prompt(
         e = candidates[idx + 1]["start_time_s"]
         if e > s:
             pairs.append((s, e))
-    return pairs 
+    return pairs
+
+
+# ---------------------------------------------------------------------------
+#  Alternating event-set pairer (V vs I)
+# ---------------------------------------------------------------------------
+
+
+def pair_alternating_sets(
+    events_vocal: List[Dict],
+    events_instr: List[Dict],
+    min_len: float = 2.0,
+) -> List[Tuple[float, float]]:
+    """Return segments whenever detection toggles between instrumental and vocal sets.
+
+    Parameters
+    ----------
+    events_vocal : list
+        Events detected on the vocal track.
+    events_instr : list
+        Events detected on the instrumental track.
+    min_len : float, default 2.0
+        Minimum segment duration (seconds) to accept.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Chronologically ordered (start,end) pairs.
+    """
+    combined: List[Tuple[float, str]] = []
+    for ev in events_vocal:
+        combined.append((ev["start_time_s"], "V"))
+    for ev in events_instr:
+        combined.append((ev["start_time_s"], "I"))
+
+    if len(combined) < 2:
+        return []
+
+    # Collapse consecutive events from the same set to avoid tiny repeated toggles
+    combined.sort(key=lambda x: x[0])
+    collapsed: List[Tuple[float, str]] = []
+    for time_t, set_id in combined:
+        if not collapsed or set_id != collapsed[-1][1]:
+            collapsed.append((time_t, set_id))
+
+    if len(collapsed) < 2:
+        return []
+
+    segments: List[Tuple[float, float]] = []
+    for (start_t, set_a), (end_t, set_b) in zip(collapsed, collapsed[1:]):
+        if set_a != set_b and (end_t - start_t) >= min_len:
+            segments.append((start_t, end_t))
+    return segments 

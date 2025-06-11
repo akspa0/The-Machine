@@ -26,6 +26,15 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - System prompt for persona generation now instructs LLM to be concise, allow for absurdity, and keep responses below 300 tokens.
 - All LLM chunking/continuation logic is removed; only direct responses are used.
 - Logging and debug output is robust and clear.
+- **NEW (2025-06-10):** Introduced `clap_segment.py` one-shot cutter which:
+  - Optionally separates a long recording into vocal / instrumental stems.
+  - Runs two CLAP passes (speech prompts on vocal, ring/music prompts on instrumental).
+  - Merges contiguous speech windows into variable-length segments (≥chunk_length).
+  - Saves raw event logs and a manifest in a timestamped folder under `CLAP_jobs/`.
+  - Respects privacy rule: no PII in filenames, all logs anonymised.
+  - Default confidence raised to 0.54; chunk length default 5 s.
+  - Script ≤250 LOC and now the canonical way to cut long recordings before feeding PipelineOrchestrator.
+- `cut_and_process.py` updated to call the new cutter and pipe the segments directly into the pipeline.
 
 ## Recent Changes
 
@@ -33,6 +42,9 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Automated persona manifest generation and prompt caching for downstream workflows.
 - Switched all file transfer to API-based methods (no direct file system access for ComfyUI input).
 - Improved error handling, logging, and output tracking throughout the pipeline.
+- Implemented CLAP speech-only segmentation (speech prompts only) after discovering ring prompts are not always present. Instrumental pass is logged for diagnostics.
+- Added `merge_contiguous` logic with dynamic gap based on `chunk_length`, removing prior 10-second uniform segment artefact.
+- Default thresholds harmonised across CLAP utilities (0.15 experimental, 0.54 production).
 
 ## Next Steps
 
@@ -41,6 +53,8 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
 - Continue to improve traceability, privacy, and automation in all extensions.
 - Update documentation and memory bank as the extension ecosystem evolves.
 - **Next:** Implement duration-based validation (≥10s) for all audio files before separation, log file validity after renaming, and ensure metadata transfer from single-file inputs to output soundbites.
+- Leverage instrumental detections as optional hard boundaries to split merged speech segments when ring / hang-up tones exist.
+- Consider folding `clap_segment.py` logic into PipelineOrchestrator as a pre-segmentation stage.
 
 ## Active Decisions & Considerations
 

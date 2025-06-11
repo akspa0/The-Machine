@@ -61,24 +61,19 @@ def main():
     run_folder.mkdir(parents=True, exist_ok=True)
 
     # ------------------ Step 1: CLAP cutter ------------------
-    cutter_cmd = [sys.executable, str(PROJECT_ROOT / "extensions" / "clap_segmentation_experiment.py"),
-                  str(run_folder),
-                  "--audio-file", str(audio_path),
-                  "--decode-clap-segments",
-                  "--no-separation",
-                  "--backend", args.backend]
+    segments_dir = run_folder / "segments"
+    cutter_cmd = [sys.executable, str(PROJECT_ROOT / "clap_segment.py"),
+                  str(audio_path),
+                  "--outdir", str(segments_dir)]
     if args.confidence is not None:
-        cutter_cmd += ["--confidence", str(args.confidence)]
-    if args.chunk_length is not None:
-        cutter_cmd += ["--chunk-length", str(args.chunk_length)]
-    if args.overlap is not None:
-        cutter_cmd += ["--overlap", str(args.overlap)]
-    if args.nms_gap is not None:
-        cutter_cmd += ["--nms-gap", str(args.nms_gap)]
+        cutter_cmd += ["--threshold", str(args.confidence)]
+    if args.backend == "utils":
+        # new cutter only supports utils backend; whisper kept for backward compatibility
+        pass  # placeholder to maintain arg structure
 
     run(cutter_cmd)
 
-    seg_dir = run_folder / "clap_experiments" / "segmented_calls"
+    seg_dir = segments_dir
     if not seg_dir.exists() or not any(seg_dir.glob("*.wav")):
         sys.exit("No call segments found – aborting pipeline run.")
 

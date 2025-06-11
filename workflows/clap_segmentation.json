@@ -1,19 +1,27 @@
 {
   "clap_segmentation": {
     "prompts": [
-      "telephone ring tones",
-      "hang-up tones",
-      "dial tone",
-      "call start",
-      "call end"
+      "telephone noises",
+      "speech",
+      "conversation",
+      "music",
+      "sound effects",
+      "telephone ringing sounds",
+      "telephone hang-up tones"
     ],
-    "confidence_threshold": 0.45,
-    "min_segment_length_sec": 2,
+    "confidence_threshold": 0.4,
+    "thresholds": {
+      "ring": 0.51,
+      "speech": 0.4,
+      "music": 0.4
+    },
+    "similarity_metric": "cosine",
+    "nms_gap_sec": 1.0,
+    "chunk_length_sec": 3,
+    "overlap_sec": 2,
     "segment_padding_sec": 0.5,
-    "min_gap_sec": 3,
-    "min_call_duration_sec": 5.0,
-    "start_prompt": "telephone ring tones",
-    "end_prompt": "hang-up tones",
-    "noise_gap_sec": 1.5
+    "pairing": "tone_alternating",
+    "tone_prompt": "telephone hang-up tones",
+    "backend": "wb"
   }
 } 

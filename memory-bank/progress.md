@@ -13,7 +13,7 @@ Tracks what works, what's next, and current status for the extension-driven, lib
 - Privacy and PII removal are enforced at every stage.
 - Canonical output copying: all outputs are copied from external tools into the project structure with standardized naming and manifest tracking.
 - The system is ready for future database integration (e.g., SQLite) for job/data/metadata management.
-- **New:** Audio file validation now uses duration (≥10s) instead of file size, with pre-processing and logging of file validity. Single-file input metadata is transferred to output soundbites during finalization.
+- **Updated:** Speech-only CLAP segmentation via `clap_segment.py` reliably produces variable-length call WAVs. Outputs are stored in timestamped `CLAP_jobs/` folders with anonymised manifests and raw event logs. Cutter integrates optional separation, dual-pass CLAP, and contiguous-speech merging.
 - LLM chunking, tokenization, and summarization logic is now unified in `extensions/llm_utils.py`.
 - All scripts/extensions import from this single utility; redundant scripts have been removed.
 - CLI entry points for chunking/summarization are now via `llm_utils.py`.
@@ -39,4 +39,5 @@ Tracks what works, what's next, and current status for the extension-driven, lib
 ## Current Status
 
 - The system is fully extension-driven, robust, and ready for database integration and further extension-driven development.
-- Legacy/monolithic pipeline logic is deprecated in favor of modular, API-driven extensions. 
+- Legacy/monolithic pipeline logic is deprecated in favor of modular, API-driven extensions.
+- Next iteration: use instrumental detections as hard boundaries and move cutter logic into PipelineOrchestrator. 
