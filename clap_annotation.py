@@ -10,6 +10,7 @@ import numpy as np
 import soundfile as sf
 from shutil import copyfile
 import logging
+from extensions.clap_utils import detect_clap_events
 # If LLM chunking/tokenization is needed, import from llm_utils
 # from llm_utils import split_into_chunks_advanced
 
@@ -100,111 +101,61 @@ def annotate_clap_for_out_files(
     overlap_sec=2,
     confidence_threshold=0.6
 ) -> list:
-    """
-    Annotate all files in input_dir using CLAP and save results in output_dir.
-    Uses the specified CLAP model.
-    Logs all CLAP events with confidence >= threshold to a .json per file.
-    Returns a list of result dicts for manifest.
+    """High-level directory annotator powered by extensions.clap_utils.detect_clap_events.
+
+    For each audio file that looks like an anonymised `*-out-*.wav` (or mp3/flac) we
+    run CLAP detection, store the accepted events in a companion JSON, and return a
+    manifest-friendly list summarising the work.  All logging is anonymised: we never
+    output the original path, only the call-ID extracted from the filename.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     results = []
-    # Load model and processor
-    logging.info(f"[CLAP] Loading model: {model_id}")
-    processor = ClapProcessor.from_pretrained(model_id)
-    model = ClapModel.from_pretrained(model_id)
-    # Move model to GPU if available
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-    logging.info(f"[CLAP] Model loaded: {model_id} on device: {device}")
-    model.eval()
+
     for audio_file in input_dir.glob('*'):
-        if not audio_file.is_file() or audio_file.suffix.lower() not in ['.wav', '.mp3', '.flac']:
+        if not audio_file.is_file() or audio_file.suffix.lower() not in {'.wav', '.mp3', '.flac'}:
             continue
-        # Load audio to check sample rate
-        waveform, sr = torchaudio.load(str(audio_file))
-        duration = waveform.shape[-1] / sr
-        logging.info(f"[CLAP] Analyzing: {audio_file} | shape: {waveform.shape} | sr: {sr} | duration: {duration:.2f}s")
-        # Resample to 48000 Hz using ffmpeg if needed
-        target_sr = 48000
-        resampled_audio_path = output_dir / (audio_file.stem + '_clap_48k.wav')
-        if sr != target_sr:
-            import subprocess
-            ffmpeg_cmd = [
-                'ffmpeg', '-y', '-i', str(audio_file),
-                '-ar', str(target_sr),
-                '-ac', '1',  # mono for CLAP
-                str(resampled_audio_path)
-            ]
-            logging.info(f"[CLAP] Running ffmpeg for resample: {' '.join(ffmpeg_cmd)}")
-            result = subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if result.returncode != 0:
-                logging.error(f"[CLAP] ffmpeg resample failed for {audio_file.name}: {result.stderr.decode()}")
-                continue
-            logging.info(f"[CLAP] Saved ffmpeg-resampled audio to {resampled_audio_path}")
-        else:
-            # Save a copy as the resampled path for consistency
-            import shutil
-            shutil.copy2(audio_file, resampled_audio_path)
-            logging.info(f"[CLAP] Audio already at 48kHz, copied to {resampled_audio_path}")
-        # Load the resampled audio
-        waveform, sr = torchaudio.load(str(resampled_audio_path))
-        # Convert to mono if needed (should already be mono from ffmpeg)
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        # Chunking (memory-efficient)
-        chunk_samples = int(chunk_length_sec * sr)
-        overlap_samples = int(overlap_sec * sr)
-        total_samples = waveform.shape[1]
-        start = 0
-        chunk_idx = 0
-        events = []
-        while start < total_samples:
-            end = min(start + chunk_samples, total_samples)
-            chunk = waveform[:, start:end]
-            chunk_duration = (end - start) / sr
-            if chunk.shape[1] < chunk_samples // 2:
-                start += chunk_samples - overlap_samples
-                continue
-            logging.info(f"[CLAP] Processing chunk {chunk_idx}: {start/sr:.2f}s - {end/sr:.2f}s ({chunk_duration:.2f}s)")
-            # Prepare input for CLAP
-            audio_np = chunk.squeeze().numpy()
-            try:
-                inputs = processor(audios=audio_np, return_tensors="pt", sampling_rate=sr, padding=True)
-                # Move all tensors to the same device as the model
-                inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
-                for prompt in prompts or []:
-                    with torch.no_grad():
-                        text_inputs = processor(text=prompt, return_tensors="pt", padding=True)
-                        text_inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in text_inputs.items()}
-                        outputs = model(**inputs, **text_inputs)
-                        logits = outputs.logits_per_audio
-                        conf = logits.item() if hasattr(logits, 'item') else float(logits)
-                        if conf >= confidence_threshold:
-                            event = {
-                                'file': str(audio_file),
-                                'prompt': prompt,
-                                'confidence': conf,
-                                'start_time': start / sr,
-                                'end_time': end / sr
-                            }
-                            events.append(event)
-            except Exception as e:
-                logging.error(f"[CLAP] Error processing chunk {chunk_idx}: {e}")
-            start += chunk_samples - overlap_samples
-            chunk_idx += 1
-        logging.info(f"[CLAP] Processed {chunk_idx} chunks for {audio_file.name}")
-        # Write results
-        out_json = output_dir / (audio_file.stem + '_clap_annotations.json')
+
+        call_id, channel, timestamp = parse_anonymized_filename(audio_file.name)
+        if call_id is None:
+            # Skip anything that isn't already anonymised
+            continue
+
+        logging.info(f"[CLAP] Processing call-id {call_id}, channel {channel}")
+
+        events = detect_clap_events(
+            audio_file,
+            prompts or [],
+            model_id=model_id,
+            chunk_length_sec=chunk_length_sec,
+            overlap_sec=overlap_sec,
+            confidence_threshold=confidence_threshold,
+        )
+
+        # Flatten events → per-prompt list for manifest compatibility
+        accepted_annotations = []
+        for ev in events:
+            for prompt, conf in ev['prompts'].items():
+                accepted_annotations.append({
+                    'call_id': call_id,
+                    'prompt': prompt,
+                    'confidence': conf,
+                    'start_time': ev['start_time_s'],
+                    'end_time': ev['end_time_s'],
+                })
+
+        out_json = output_dir / f"{audio_file.stem}_clap_annotations.json"
         with open(out_json, 'w', encoding='utf-8') as f:
-            json.dump(events, f, indent=2)
-        logging.info(f"[CLAP] {audio_file.name}: {len(events)} events detected, written to {out_json}")
+            json.dump(accepted_annotations, f, indent=2)
+
+        logging.info(f"[CLAP] {audio_file.name}: {len(accepted_annotations)} accepted annotations written to {out_json.name}")
+
         results.append({
             'input_name': audio_file.name,
             'annotation_path': str(out_json),
-            'resampled_audio_path': str(resampled_audio_path),
-            'accepted_annotations': events,
-            'call_id': audio_file.stem
+            'accepted_annotations': accepted_annotations,
+            'call_id': call_id,
         })
+
     return results
 
 def pair_clap_events(events, config, total_duration):
@@ -303,4 +254,46 @@ def segment_audio_with_clap(
             "source_file": str(audio_path),
             "events": [e for e in filtered_events if seg_start <= e["start_time"] < seg_end]
         })
-    return segments 
+    return segments
+
+# ---------------------------------------------------------------------------
+# Convenience wrapper using workflow JSON
+
+def annotate_clap_from_workflow(
+    input_dir: Path,
+    output_dir: Path,
+    workflow_path: Path = Path(__file__).resolve().parent / 'workflows' / 'clap_annotation.json',
+) -> list:
+    """Load *workflow_path* JSON and run annotate_clap_for_out_files.
+
+    The JSON is expected to look like::
+
+        {
+            "prompts": [...],
+            "confidence_threshold": 0.4,
+            "chunk_length_sec": 8,
+            "overlap_sec": 3
+        }
+    """
+    import json
+
+    if not workflow_path.exists():
+        raise FileNotFoundError(f"Workflow config not found: {workflow_path}")
+
+    with open(workflow_path, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+
+    prompts = cfg.get('prompts', [])
+    confidence = cfg.get('confidence_threshold', 0.5)
+    chunk_len = cfg.get('chunk_length_sec', 10)
+    overlap = cfg.get('overlap_sec', 0)
+
+    return annotate_clap_for_out_files(
+        input_dir,
+        output_dir,
+        prompts=prompts,
+        model_id='laion/clap-htsat-unfused',
+        chunk_length_sec=chunk_len,
+        overlap_sec=overlap,
+        confidence_threshold=confidence,
+    ) 

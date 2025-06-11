@@ -54,7 +54,8 @@ class Job:
         self.job_type = job_type  # 'rename' or 'separate'
 
 class PipelineOrchestrator:
-    def __init__(self, run_folder: Path, asr_engine: str, llm_config_path: str = None):
+    def __init__(self, run_folder: Path, asr_engine: str, llm_config_path: str = None,
+                 process_out_files: bool = False, call_cutter: bool = False):
         self.jobs: List[Job] = []
         self.log: List[Dict[str, Any]] = []
         self.manifest: List[Dict[str, Any]] = []
@@ -65,6 +66,9 @@ class PipelineOrchestrator:
         self.asr_engine = asr_engine
         self.llm_config_path = llm_config_path
         self.global_llm_seed = None
+        # New behaviour flags
+        self.process_out_files = process_out_files
+        self.call_cutter = call_cutter
     def add_job(self, job: Job):
         self.jobs.append(job)
     def log_event(self, level, event, details=None):
@@ -156,14 +160,20 @@ class PipelineOrchestrator:
                     'message': 'File skipped for separation: smaller than 200KB'
                 })
                 continue
-            # Skip files starting with 'out-'
+            # Handle optional processing of single out- files
             if file.name.startswith('out-'):
-                self.log_event('INFO', 'file_skipped_out_prefix', {
-                    'input_name': file.name,
-                    'message': "File skipped for separation: starts with 'out-'"
-                })
-                continue
-            if ('-left-' in file.name or '-right-' in file.name):
+                if self.process_out_files:
+                    self.log_event('INFO', 'file_included_out_prefix', {
+                        'input_name': file.name,
+                        'message': "Including 'out-' file for separation because --process-out-files flag is set"
+                    })
+                else:
+                    self.log_event('INFO', 'file_skipped_out_prefix', {
+                        'input_name': file.name,
+                        'message': "File skipped for separation: starts with 'out-' (processing disabled)"
+                    })
+                    continue
+            if ('-left-' in file.name or '-right-' in file.name or (self.process_out_files and file.name.startswith('out-'))):
                 job_data = {
                     'input_path': str(file),
                     'input_name': file.name
@@ -188,10 +198,10 @@ class PipelineOrchestrator:
                         'message': 'File skipped for diarization: <10s duration or unreadable'
                     })
                     continue
-                if file.name.startswith('out-'):
+                if file.name.startswith('out-') and not self.process_out_files:
                     self.log_event('INFO', 'file_skipped_out_prefix', {
                         'input_name': file.name,
-                        'message': "File skipped for diarization: starts with 'out-'"
+                        'message': "File skipped for diarization: starts with 'out-' (processing disabled)"
                     })
                     continue
                 single_file_count += 1
@@ -1482,7 +1492,9 @@ class PipelineOrchestrator:
         run_finalization_stage(self.run_folder, self.manifest)
 
     def run(self, mode='auto', call_cutter=False, call_tones=False):
-        print(f"[INFO] Running pipeline in {mode} mode.")
+        # Update runtime flags
+        self.call_cutter = call_cutter
+        print(f"[INFO] Running pipeline in {mode} mode. call_cutter={call_cutter}")
         if mode == 'single-file':
             self.run_single_file_workflow(call_tones=call_tones)
         elif mode == 'calls':
@@ -1583,6 +1595,9 @@ class PipelineOrchestrator:
         # Full pipeline for call-processing mode
         self._run_ingestion_jobs()
         self.add_separation_jobs()
+        # Optional: CLAP-based segmentation before further processing
+        if self.call_cutter:
+            self.run_clap_segmentation_stage()
         self.run_audio_separation_stage()
         self.run_normalization_stage()
         self.run_true_peak_normalization_stage()
@@ -2215,7 +2230,7 @@ if __name__ == '__main__':
             # Continue with normal run
 
         # Create orchestrator for existing folder - DO NOT create or reconstruct jobs
-        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
+        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config, args.process_out_files, args.call_cutter)
         # Load manifest if it exists
         manifest_path = run_folder / 'manifest.json'
         if manifest_path.exists():
@@ -2267,7 +2282,7 @@ if __name__ == '__main__':
             run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
             run_folder = Path('outputs') / f'run-{run_ts}'
         print(f"🆕 Starting fresh run: {run_folder}")
-        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
+        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config, args.process_out_files, args.call_cutter)
         jobs = create_jobs_from_input(input_dir)
         for job in jobs:
             orchestrator.add_job(job)

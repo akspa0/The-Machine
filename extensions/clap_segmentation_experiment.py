@@ -21,16 +21,28 @@ except ModuleNotFoundError as e:
     ExtensionBase = extmod.ExtensionBase
 from typing import List, Optional
 import torchaudio
-from transformers import ClapProcessor, ClapModel
-import torch
+# NOTE: CLAP model interactions are now handled via extensions.clap_utils
 import numpy as np
 import tempfile
-from audio_separation import separate_audio_file
 import shutil
 import re
 import datetime
 # If LLM chunking/tokenization is needed, import from llm_utils
 # from llm_utils import split_into_chunks_advanced
+
+# Third-party
+import numpy as np
+import tempfile
+import shutil
+import re
+import datetime
+
+# Project imports
+import tempfile, shutil, re, datetime, json
+import torchaudio
+from extensions.clap_utils import detect_clap_events
+from audio_separation import separate_audio_file
+from extensions.clap_whisper_detector import detect_clap_events_wb
 
 class ClapSegmentationExperiment(ExtensionBase):
     """
@@ -42,21 +54,93 @@ class ClapSegmentationExperiment(ExtensionBase):
     Usage:
         python clap_segmentation_experiment.py <output_root> [--audio-file path/to/audio.wav] [--confidence 0.6]
     """
-    def __init__(self, output_root, audio_file: Optional[str] = None, confidence: float = 0.6, chunk_length_sec: int = 10):
+    def __init__(
+        self,
+        output_root,
+        audio_file: Optional[str] = None,
+        confidence: float = 0.6,
+        chunk_length_sec: int = 10,
+        overlap_sec: int = 0,
+        config_path: Optional[str] = None,
+        no_separation: bool = False,
+        auto_calibrate: Optional[int] = None,
+        similarity_metric: str = "sigmoid",
+        nms_gap: float = 0.0,
+        backend: str = "utils",
+        pairing_override: Optional[str] = None,
+        min_segment_length: float | None = None,
+    ):
+        """Create segmentation experiment extension.
+
+        Args:
+            output_root: root directory of run (outputs/run-*)
+            audio_file: optional single audio file to process
+            confidence: default fallback threshold (overridden by config)
+            chunk_length_sec: detection chunk length (overridden by config)
+            overlap_sec: detection overlap length (overridden by config)
+            config_path: JSON workflow file (defaults to workflows/clap_segmentation.json)
+            no_separation: skip vocal/instrumental separation and run CLAP directly on input
+            auto_calibrate: seconds for auto-threshold calibration (uses mean+3σ)
+            similarity_metric: similarity metric to threshold on (sigmoid probability or raw cosine)
+            nms_gap: temporal NMS gap in seconds (0 disables)
+            backend: backend to use for CLAP detection
+            pairing_override: pairing mode override (e.g., raw_events)
+            min_segment_length: minimum segment length in seconds (override config)
+        """
         super().__init__(output_root)
         self.audio_file = audio_file
-        self.confidence = confidence
-        self.chunk_length_sec = chunk_length_sec  # Default 10s, tunable via CLI
-        self.experiments_dir = self.output_root / 'clap_experiments'
-        self.segments_dir = self.experiments_dir / 'segmented_calls'
+        # Load segmentation workflow config if present
+        cfg_path = (
+            Path(config_path)
+            if config_path
+            else Path(__file__).resolve().parent.parent / "workflows" / "clap_segmentation.json"
+        )
+        if cfg_path.exists():
+            import json
+
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg_json = json.load(f)
+            # Accept root-level or nested key
+            self.seg_config = cfg_json.get("clap_segmentation", cfg_json)
+        else:
+            self.seg_config = {}
+
+        # Allow pairing override
+        if pairing_override is not None:
+            self.seg_config["pairing"] = pairing_override
+
+        # Min-segment-length override or default for raw_events
+        if min_segment_length is not None:
+            self.seg_config["min_segment_length_sec"] = float(min_segment_length)
+        elif self.seg_config.get("pairing") == "raw_events" and "min_segment_length_sec" not in self.seg_config:
+            self.seg_config["min_segment_length_sec"] = 2.0
+
+        # Apply config overrides
+        self.confidence = self.seg_config.get("confidence_threshold", confidence)
+        self.chunk_length_sec = self.seg_config.get("chunk_length_sec", chunk_length_sec)
+        self.overlap_sec = self.seg_config.get("overlap_sec", overlap_sec)
+        self.prompts = self.seg_config.get(
+            "prompts",
+            [
+                "telephone ring tones",
+                "hang-up tones",
+            ],
+        )
+
+        self.model_id = "laion/clap-htsat-fused"
+
+        self.no_separation = no_separation
+
+        self.auto_calibrate = auto_calibrate
+        self.similarity_metric = self.seg_config.get("similarity_metric", similarity_metric)
+        self.nms_gap = self.seg_config.get("nms_gap_sec", nms_gap)
+        self.backend = self.seg_config.get("backend", backend)
+
+        # Output dirs
+        self.experiments_dir = self.output_root / "clap_experiments"
+        self.segments_dir = self.experiments_dir / "segmented_calls"
         self.experiments_dir.mkdir(exist_ok=True, parents=True)
         self.segments_dir.mkdir(exist_ok=True, parents=True)
-        self.model_id = "laion/clap-htsat-fused"
-        self.prompts = [
-            "telephone ring tones",
-            "hang-up tones",
-            # Add more prompts as needed
-        ]
 
     def run(self):
         if self.audio_file:
@@ -75,38 +159,63 @@ class ClapSegmentationExperiment(ExtensionBase):
         # Multi-track CLAP segmentation: process both vocal and instrumental tracks if available
         seg_file = self.experiments_dir / f"{audio_path.stem}_clap_segments.json"
         events = []
-        # Prepare temp dir for separation outputs
+        # Prepare temp dir
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_dir_path = Path(temp_dir)
-            # Ensure input file matches expected pattern for separation
-            pattern = r'\d{4}-(left|right|out)-[\d-]+\.wav'
-            if not re.match(pattern, audio_path.name):
-                # Create temp copy with compatible name: 0000-out-YYYYMMDD-HHMMSS.wav
-                timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-                temp_input = temp_dir_path / f'0000-out-{timestamp}.wav'
-                # Convert to wav if needed
-                if audio_path.suffix.lower() != '.wav':
-                    import soundfile as sf
-                    import numpy as np
-                    data, sr = sf.read(str(audio_path))
-                    sf.write(str(temp_input), data, sr)
-                    self.log(f"[DIAG] Converted {audio_path} to {temp_input} (wav)")
+
+            stems = {}
+            if not self.no_separation:
+                # --- Attempt separation first ---
+                pattern = r'\d{4}-(left|right|out)-[\d-]+\.wav'
+                if not re.match(pattern, audio_path.name):
+                    timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+                    temp_input = temp_dir_path / f'0000-out-{timestamp}.wav'
+                    # Convert to wav if needed
+                    if audio_path.suffix.lower() != '.wav':
+                        import soundfile as sf
+                        data, sr = sf.read(str(audio_path))
+                        sf.write(str(temp_input), data, sr)
+                    else:
+                        shutil.copy2(audio_path, temp_input)
+                    input_for_sep = temp_input
                 else:
-                    shutil.copy2(audio_path, temp_input)
-                input_for_sep = temp_input
-            else:
-                input_for_sep = audio_path
-            # Use only the model filename, let audio_separation.py handle model resolution
-            model_path = 'mel_band_roformer_vocals_fv4_gabox.ckpt'
-            # Run separation using local audio_separation.py wrapper (calls audio-separator CLI)
-            sep_result = separate_audio_file(input_for_sep, temp_dir_path, model_path)
-            if sep_result.get('separation_status') != 'success':
-                self.log(f"[SEPARATION ERROR] Return code: {sep_result.get('returncode')}, stderr: {sep_result.get('stderr')}")
-            stems = {s['stem_type']: Path(s['output_path']) for s in sep_result.get('output_stems', [])}
+                    input_for_sep = audio_path
+
+                model_path = 'mel_band_roformer_vocals_fv4_gabox.ckpt'
+                sep_result = separate_audio_file(input_for_sep, temp_dir_path, model_path)
+                if sep_result.get('separation_status') == 'success':
+                    stems = {s['stem_type']: Path(s['output_path']) for s in sep_result.get('output_stems', [])}
+                else:
+                    self.log(f"[SEPARATION ERROR] {sep_result.get('stderr', '')}. Falling back to original audio for CLAP.")
+
+            # --- Fallback: if no stems or self.no_separation, create stems dict with 'fallback' key ---
+            if not stems:
+                stems = {'fallback': audio_path}
+
             # Run CLAP on vocals
             if 'vocals' in stems and stems['vocals'].exists():
                 self.log(f"[SEPARATION] Running CLAP on vocals: {stems['vocals']}")
-                vocal_events = self.segment_audio_with_clap(stems['vocals'])
+                if self.backend == "utils":
+                    vocal_events = detect_clap_events(
+                        stems['vocals'],
+                        self.prompts,
+                        model_id=self.model_id,
+                        chunk_length_sec=self.chunk_length_sec,
+                        overlap_sec=self.overlap_sec,
+                        confidence_threshold=self.confidence,
+                        auto_calibrate_seconds=self.auto_calibrate,
+                        similarity_metric=self.similarity_metric,
+                        nms_gap_sec=self.nms_gap,
+                    )
+                else:
+                    vocal_events = detect_clap_events_wb(
+                        stems['vocals'],
+                        self.prompts,
+                        model_id=self.model_id,
+                        chunk_length_sec=self.chunk_length_sec,
+                        threshold=self.confidence,
+                        nms_gap_sec=self.nms_gap,
+                    )
                 for e in vocal_events:
                     e['track'] = 'vocal'
                 events.extend(vocal_events)
@@ -115,79 +224,80 @@ class ClapSegmentationExperiment(ExtensionBase):
             # Run CLAP on instrumental
             if 'instrumental' in stems and stems['instrumental'].exists():
                 self.log(f"[SEPARATION] Running CLAP on instrumental: {stems['instrumental']}")
-                instr_events = self.segment_audio_with_clap(stems['instrumental'])
+                if self.backend == "utils":
+                    instr_events = detect_clap_events(
+                        stems['instrumental'],
+                        self.prompts,
+                        model_id=self.model_id,
+                        chunk_length_sec=self.chunk_length_sec,
+                        overlap_sec=self.overlap_sec,
+                        confidence_threshold=self.confidence,
+                        auto_calibrate_seconds=self.auto_calibrate,
+                        similarity_metric=self.similarity_metric,
+                        nms_gap_sec=self.nms_gap,
+                    )
+                else:
+                    instr_events = detect_clap_events_wb(
+                        stems['instrumental'],
+                        self.prompts,
+                        model_id=self.model_id,
+                        chunk_length_sec=self.chunk_length_sec,
+                        threshold=self.confidence,
+                        nms_gap_sec=self.nms_gap,
+                    )
                 for e in instr_events:
                     e['track'] = 'instrumental'
                 events.extend(instr_events)
             else:
                 self.log(f"[SEPARATION] No instrumental track found for {audio_path.name}")
+
+            # If fallback key present, run directly on original / temp wav
+            if 'fallback' in stems and Path(stems['fallback']).exists():
+                fb_path = Path(stems['fallback'])
+                # Ensure WAV format for torchaudio reliability
+                if fb_path.suffix.lower() != '.wav':
+                    conv_path = temp_dir_path / (fb_path.stem + '_conv.wav')
+                    self.log(f"[CONVERT] ffmpeg {fb_path.name} -> {conv_path.name}")
+                    import subprocess, shlex
+                    cmd = [
+                        'ffmpeg', '-y', '-i', str(fb_path),
+                        '-ac', '1', '-ar', '48000', str(conv_path)
+                    ]
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if res.returncode != 0:
+                        self.log(f"[FFMPEG ERROR] {res.stderr.decode()[:200]}")
+                    else:
+                        fb_path = conv_path
+                self.log(f"[CLAP] Running fallback CLAP on {fb_path}")
+                if self.backend == "utils":
+                    fb_events = detect_clap_events(
+                        fb_path,
+                        self.prompts,
+                        model_id=self.model_id,
+                        chunk_length_sec=self.chunk_length_sec,
+                        overlap_sec=self.overlap_sec,
+                        confidence_threshold=self.confidence,
+                        auto_calibrate_seconds=self.auto_calibrate,
+                        similarity_metric=self.similarity_metric,
+                        nms_gap_sec=self.nms_gap,
+                    )
+                else:
+                    fb_events = detect_clap_events_wb(
+                        fb_path,
+                        self.prompts,
+                        model_id=self.model_id,
+                        chunk_length_sec=self.chunk_length_sec,
+                        threshold=self.confidence,
+                        nms_gap_sec=self.nms_gap,
+                    )
+                for e in fb_events:
+                    e['track'] = 'fallback'
+                events.extend(fb_events)
+
         # Save merged events; segment construction is handled by decode_clap_segments
         with open(seg_file, 'w', encoding='utf-8') as f:
             json.dump(events, f, indent=2)
         self.log(f"Wrote {len(events)} CLAP events (multi-track, separated) to {seg_file}")
-
-    def segment_audio_with_clap(self, audio_path: Path) -> List[dict]:
-        """
-        CLAP event detection with chunking. 10s chunks and 0.6 confidence work well for most call audio.
-        """
-        chunk_length_sec = self.chunk_length_sec  # Use instance variable
-        overlap_sec = 0  # No overlap for now
-        processor = ClapProcessor.from_pretrained(self.model_id)
-        model = ClapModel.from_pretrained(self.model_id)
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = model.to(device)
-        model.eval()
-        waveform, sr = torchaudio.load(str(audio_path))
-        if sr != 48000:
-            import torchaudio.functional as F
-            waveform = F.resample(waveform, sr, 48000)
-            sr = 48000
-        total_samples = waveform.shape[1]
-        duration = total_samples / sr
-        chunk_samples = int(chunk_length_sec * sr)
-        n_chunks = int(np.ceil(total_samples / chunk_samples))
-        # Precompute text features
-        text_inputs = processor(text=self.prompts, return_tensors="pt", padding=True).to(device)
-        with torch.no_grad():
-            text_features = model.get_text_features(**text_inputs)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        events = []
-        for i in range(n_chunks):
-            start = i * chunk_length_sec
-            end = min((i + 1) * chunk_length_sec, duration)
-            s_idx = int(start * sr)
-            e_idx = int(end * sr)
-            chunk_audio = waveform[:, s_idx:e_idx]
-            # Ensure mono and 1D
-            if chunk_audio.ndim == 2 and chunk_audio.shape[0] > 1:
-                chunk_audio = chunk_audio.mean(dim=0)
-            chunk_audio = chunk_audio.squeeze().cpu().numpy()
-            if chunk_audio.size == 0:
-                continue
-            audio_inputs = processor(audios=chunk_audio, sampling_rate=sr, return_tensors="pt").to(device)
-            with torch.no_grad():
-                audio_features = model.get_audio_features(**audio_inputs)
-                audio_features = audio_features / audio_features.norm(dim=-1, keepdim=True)
-                logits_per_audio = audio_features @ text_features.T
-                probs = torch.sigmoid(logits_per_audio).cpu().detach().numpy()
-            # Fix shape: should be (num_prompts,) or (1, num_prompts)
-            if probs.ndim == 2 and probs.shape[0] == 1:
-                probs = probs[0]
-            elif probs.ndim == 0:
-                probs = np.array([probs])
-            elif probs.ndim != 1:
-                self.log(f"[WARNING] Unexpected probs shape: {probs.shape} at chunk {i}")
-                probs = probs.flatten()
-            chunk_probabilities = {prompt: float(prob) for prompt, prob in zip(self.prompts, probs)}
-            filtered_prompts = {p: prob for p, prob in chunk_probabilities.items() if prob >= self.confidence}
-            if filtered_prompts:
-                events.append({
-                    "start_time_s": round(start, 3),
-                    "end_time_s": round(end, 3),
-                    "prompts": filtered_prompts
-                })
-        # Save events for downstream pairing
-        return events
 
     def decode_clap_segments(self):
         """
@@ -199,14 +309,16 @@ class ClapSegmentationExperiment(ExtensionBase):
         - Log when a segment is started/ended, and if segments are skipped (e.g., too short).
         - Diagnostics: print all unique prompt strings found in the events JSON.
         """
-        min_segment_length = 2.0  # DEBUG: Lowered for diagnosis; restore to 12.0 after
-        padding = 0.5
-        start_prompts = [
-            'telephone ringing', 'music', 'speech', 'laughter', 'telephone greeting', 'telephone noises', 'telephone ring tones'
-        ]
-        end_prompts = [
-            'telephone hang-up tones', 'laughter', 'music', 'telephone noises', 'telephone hang-up noises', 'hang-up tone'
-        ]
+        min_segment_length = self.seg_config.get("min_segment_length_sec", 10.0)
+        padding = self.seg_config.get("segment_padding_sec", 0.5)
+
+        pairing_mode = self.seg_config.get("pairing", "contiguous")
+        thr_dict = self.seg_config.get("thresholds", {
+            "ring": 0.45,
+            "speech": 0.35,
+            "music": 0.4,
+        })
+
         seg_files = list(self.experiments_dir.glob("*_clap_segments.json"))
         for seg_file in seg_files:
             with open(seg_file, 'r', encoding='utf-8') as f:
@@ -225,80 +337,65 @@ class ClapSegmentationExperiment(ExtensionBase):
             audio_stem = seg_file.stem.replace('_clap_segments', '')
             audio_candidates = list((self.output_root / 'finalized' / 'calls').glob(f'{audio_stem}.*'))
             if not audio_candidates:
+                # Fallback: use original audio_file if provided and matches stem
+                if self.audio_file and Path(self.audio_file).stem == audio_stem:
+                    audio_candidates = [Path(self.audio_file)]
+                else:
+                    # Try temp converted wav in same folder as seg_file stem
+                    alt_wav = Path(self.output_root) / f"{audio_stem}_conv.wav"
+                    if alt_wav.exists():
+                        audio_candidates = [alt_wav]
+            if not audio_candidates:
                 self.log(f"No audio file found for {audio_stem}")
                 continue
             audio_path = audio_candidates[0]
             waveform, sr = torchaudio.load(str(audio_path))
             audio_len = waveform.shape[1] / sr
-            # Sort events by start_time_s for robust pairing
-            events = sorted(events, key=lambda e: e['start_time_s'])
-            segments = []
-            in_segment = False
-            seg_start = None
-            seg_start_event = None
-            for idx, event in enumerate(events):
-                event_prompts = set(event.get('prompts', {}).keys())
-                is_start = bool(event_prompts & set(start_prompts))
-                is_end = bool(event_prompts & set(end_prompts))
-                if is_start:
-                    self.log(f"[DEBUG] Start event at idx {idx}, {event['start_time_s']:.2f}s, prompts: {event_prompts}, track: {event.get('track','?')}")
-                if is_end:
-                    self.log(f"[DEBUG] End event at idx {idx}, {event['end_time_s']:.2f}s, prompts: {event_prompts}, track: {event.get('track','?')}")
-                if not in_segment and is_start:
-                    seg_start = event['start_time_s']
-                    seg_start_event = event
-                    in_segment = True
-                    self.log(f"[SEG] Start at idx {idx}, {seg_start:.2f}s, prompts: {event_prompts}, track: {event.get('track','?')}")
-                if in_segment and is_end:
-                    seg_end = event['end_time_s']
-                    seg_end_event = event
-                    seg_start_p = max(0.0, seg_start - padding)
-                    seg_end_p = min(audio_len, seg_end + padding)
-                    seg_len = seg_end_p - seg_start_p
-                    self.log(f"[SEG] Attempt: start idx {idx}, {seg_start_p:.2f}s, end idx {idx}, {seg_end_p:.2f}s, len {seg_len:.2f}s")
-                    if seg_len >= min_segment_length:
-                        seg_wave = waveform[:, int(seg_start_p * sr):int(seg_end_p * sr)]
-                        seg_name = f"{audio_stem}-call_{len(segments):04d}.wav"
-                        seg_path = self.segments_dir / seg_name
-                        torchaudio.save(str(seg_path), seg_wave, sr)
-                        segments.append({
-                            'segment_index': len(segments),
-                            'start': seg_start_p,
-                            'end': seg_end_p,
-                            'output_path': str(seg_path),
-                            'source_file': str(audio_path),
-                            'start_event': seg_start_event,
-                            'end_event': seg_end_event
-                        })
-                        self.log(f"[SEG] End at idx {idx}, {seg_end:.2f}s, prompts: {event_prompts}, track: {event.get('track','?')} -> Segment {len(segments)-1} saved. Length: {seg_len:.2f}s")
-                    else:
-                        self.log(f"[SEG] Skipped short segment: {seg_start_p:.2f}s - {seg_end_p:.2f}s (len {seg_len:.2f}s)")
-                    in_segment = False
-                    seg_start = None
-                    seg_start_event = None
-            if in_segment and seg_start is not None:
-                seg_end = audio_len
+            # Pairing & segment extraction---------------------------------
+            from extensions.clap_utils import (
+                find_calls_cross_track_ring_speech_ring,
+                merge_contiguous,
+            )
+
+            if pairing_mode == "cross_track_ring_speech_ring":
+                pairs = find_calls_cross_track_ring_speech_ring(events, thr_dict)
+            elif pairing_mode == "raw_events":
+                from extensions.clap_utils import events_to_segments
+                pairs = events_to_segments(
+                    events,
+                    padding,
+                    self.seg_config.get("min_segment_length_sec", 2.0),
+                    audio_len,
+                )
+            elif pairing_mode == "tone_alternating":
+                from extensions.clap_utils import pair_alternating_prompt
+                prompt = self.seg_config.get("tone_prompt", self.seg_config.get("start_prompt", "telephone hang-up tones"))
+                pairs = pair_alternating_prompt(events, prompt)
+                # padding/min_len handled below
+            else:
+                # fallback: contiguous
+                pairs = merge_contiguous(events)
+
+            segments: list = []
+            for idx_pair, (seg_start, seg_end) in enumerate(pairs):
                 seg_start_p = max(0.0, seg_start - padding)
-                seg_end_p = audio_len
+                seg_end_p = min(audio_len, seg_end + padding)
                 seg_len = seg_end_p - seg_start_p
-                self.log(f"[SEG] Attempt: start idx END, {seg_start_p:.2f}s, end idx END, {seg_end_p:.2f}s, len {seg_len:.2f}s")
-                if seg_len >= min_segment_length:
-                    seg_wave = waveform[:, int(seg_start_p * sr):int(seg_end_p * sr)]
-                    seg_name = f"{audio_stem}-call_{len(segments):04d}.wav"
-                    seg_path = self.segments_dir / seg_name
-                    torchaudio.save(str(seg_path), seg_wave, sr)
-                    segments.append({
-                        'segment_index': len(segments),
-                        'start': seg_start_p,
-                        'end': seg_end_p,
-                        'output_path': str(seg_path),
-                        'source_file': str(audio_path),
-                        'start_event': seg_start_event,
-                        'end_event': None
-                    })
-                    self.log(f"[SEG] Closed at end of audio: {seg_start_p:.2f}s - {seg_end_p:.2f}s -> Segment {len(segments)-1} saved. Length: {seg_len:.2f}s")
-                else:
-                    self.log(f"[SEG] Skipped short segment at end: {seg_start_p:.2f}s - {seg_end_p:.2f}s (len {seg_len:.2f}s)")
+                if seg_len < min_segment_length:
+                    continue
+                seg_wave = waveform[:, int(seg_start_p * sr): int(seg_end_p * sr)]
+                seg_name = f"{audio_stem}-call_{idx_pair:04d}.wav"
+                seg_path = self.segments_dir / seg_name
+                torchaudio.save(str(seg_path), seg_wave, sr)
+                segments.append({
+                    'segment_index': idx_pair,
+                    'start': seg_start_p,
+                    'end': seg_end_p,
+                    'output_path': str(seg_path),
+                    'source_file': str(audio_path),
+                    'start_event': None,
+                    'end_event': None,
+                })
             manifest_path = self.segments_dir / f"{audio_stem}_clap_segment_manifest.json"
             with open(manifest_path, 'w', encoding='utf-8') as f:
                 json.dump(segments, f, indent=2)
@@ -306,8 +403,11 @@ class ClapSegmentationExperiment(ExtensionBase):
             with open(txt_path, 'w', encoding='utf-8') as f:
                 for seg in segments:
                     f.write(f"Segment {seg['segment_index']}: {seg['start']:.2f}s - {seg['end']:.2f}s\n")
-                    f.write(f"  Start event: {seg['start_event']}\n")
-                    f.write(f"  End event: {seg['end_event']}\n\n")
+                    f.write(f"  Start event: {seg.get('start_event')}
+")
+                    f.write(f"  End event: {seg.get('end_event')}
+
+")
             self.log(f"Decoded {len(segments)} segments for {audio_stem}, manifest: {manifest_path.name}, txt: {txt_path.name}")
 
 def main():
@@ -317,9 +417,32 @@ def main():
     parser.add_argument('--audio-file', type=str, default=None, help='Optional: path to a single audio file to process')
     parser.add_argument('--confidence', type=float, default=0.6, help='Confidence threshold for CLAP events')
     parser.add_argument('--chunk-length', type=int, default=10, help='Chunk length in seconds (default: 10)')
+    parser.add_argument('--overlap', type=float, default=0.0, help='Overlap seconds between chunks.')
+    parser.add_argument('--config', type=str, default=None, help='Path to clap_segmentation workflow JSON')
     parser.add_argument('--decode-clap-segments', action='store_true', help='Decode clap_segments into paired segments and output manifest/txt')
+    parser.add_argument('--no-separation', action='store_true', help='Skip vocal/instrumental separation and run CLAP directly on input')
+    parser.add_argument('--auto-calibrate', type=int, default=None, help='Seconds for auto-threshold calibration (uses mean+3σ)')
+    parser.add_argument('--similarity', type=str, choices=['sigmoid', 'cosine'], default='sigmoid', help='Similarity metric to threshold on (sigmoid probability or raw cosine).')
+    parser.add_argument('--nms-gap', type=float, default=0.0, help='Temporal NMS gap in seconds (0 disables).')
+    parser.add_argument('--backend', type=str, choices=['utils', 'whisper'], default='utils', help='Backend to use for CLAP detection')
+    parser.add_argument('--pairing', type=str, default=None, help='Pairing mode override (e.g., raw_events)')
+    parser.add_argument('--min-segment-length', type=float, default=None, help='Minimum segment length seconds (override config)')
     args = parser.parse_args()
-    ext = ClapSegmentationExperiment(args.output_root, audio_file=args.audio_file, confidence=args.confidence, chunk_length_sec=args.chunk_length)
+    ext = ClapSegmentationExperiment(
+        args.output_root,
+        audio_file=args.audio_file,
+        confidence=args.confidence,
+        chunk_length_sec=args.chunk_length,
+        overlap_sec=args.overlap,
+        config_path=args.config,
+        no_separation=args.no_separation,
+        auto_calibrate=args.auto_calibrate,
+        similarity_metric=args.similarity,
+        nms_gap=args.nms_gap,
+        backend=args.backend,
+        pairing_override=args.pairing,
+        min_segment_length=args.min_segment_length,
+    )
     if args.decode_clap_segments:
         ext.decode_clap_segments()
     else:
