@@ -63,6 +63,22 @@ Below are the main extensions included in this project. Each can be run independ
   python extensions/comedic_show_story_builder.py outputs/run-YYYYMMDD-HHMMSS
   ```
 
+### 🚀 `flashsr_extension.py`
+- **Purpose:** Upsamples / enhances low-quality audio using FlashSR super-resolution (auto-downloads weights from Hugging Face).
+- **Usage:**
+  ```sh
+  python extensions/flashsr_extension.py --input outputs/run-YYYYMMDD-HHMMSS/call/0003_vocals_only --device cuda
+  ```
+  Runs automatically when the pipeline is invoked with `--flashsr`.
+
+### 🔔 `bleeper_extension.py`
+- **Purpose:** Detects profanity in the first 180 seconds of the compiled show and overlays a configurable beep (or mute) tone; produces `show_bleeped.wav`.
+- **Usage (stand-alone):**
+  ```sh
+  python -m extensions.bleeper_extension --input outputs/run-YYYYMMDD-HHMMSS/finalized/show
+  ```
+  Automatically executed during `finalization_stage.py`; both clean and bleeped versions are kept.
+
 ### 🧹 `transcript_and_soundbite_cleanup.py`
 - **Purpose:** Aggregates transcripts and cleans up obsolete soundbites after processing.
 - **Usage:**
@@ -96,6 +112,8 @@ Below are the main extensions included in this project. Each can be run independ
 ---
 
 ## 🚦 Quickstart: Running & Authoring Extensions
+
+Some extensions (e.g., **bleeper** during finalization or **flashsr** when `--flashsr` flag is set) run automatically in the core pipeline. Others can be invoked manually as shown.
 
 1. **Run any extension** with the output folder as its argument (see above examples).
 2. **Author your own:**
