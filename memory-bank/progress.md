@@ -19,6 +19,8 @@ Tracks what works, what's next, and current status for the extension-driven, lib
 - CLI entry points for chunking/summarization are now via `llm_utils.py`.
 - All extensions remain independently runnable and functional.
 - Persona builder and transcript utility now robustly enforce per-speaker, per-channel, per-call boundaries.
+- FlashSR extension successfully enhances low-quality audio; supports GPU batching, chunk parameters, and custom output directory.
+- Bleeper extension automatically censors profanity in first 3 minutes, generates bleeped WAV/MP3.
 - Only process transcripts ≥300 bytes and ≥15s audio for persona; skip and log otherwise.
 - Utility script only generates transcripts if ≥5 lines, never mixes channels/calls.
 - LLM call synopsis appended to persona input if available.

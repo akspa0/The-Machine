@@ -7,7 +7,7 @@ It integrates seamlessly with The-Machine's librarian orchestrator and respects 
 ---
 ## Key Features
 * **Automatic model download** – Weights are fetched from the Hugging Face dataset [`jakeoneijk/FlashSR_weights`](https://huggingface.co/datasets/jakeoneijk/FlashSR_weights/tree/main) on first run and cached in `.cache/flashsr_weights/`.
-* **Smart auto-trigger** – Enhances any WAV whose sample-rate < 32 kHz, or whenever the orchestrator is invoked with the `--flashsr` flag.
+* **Processes every WAV** – Every `.wav` in the given folder (or the single input file) is enhanced unless a matching `_flashsr.wav` already exists.
 * **GPU / CPU friendly** – Defaults to CUDA but falls back to CPU if no GPU is available.
 * **Graceful fallback** – If FlashSR cannot be imported, the extension upsamples via high-quality sinc resampling so your pipeline never breaks.
 * **Manifest integration** – Adds anonymised enhancement records to `manifest.json` for every processed file.
@@ -19,19 +19,43 @@ It integrates seamlessly with The-Machine's librarian orchestrator and respects 
    ```bash
    pip install -r requirements.txt
    ```
-   The FlashSR wrapper library and `huggingface_hub` are already included.
+   The FlashSR inference wrapper (`flashsr_inference`) and `huggingface_hub` are already included.
+
+3. **Install the upstream FlashSR package** (one-time):
+
+   The original repository installation scripts target Linux, but on Windows / macOS you only need a standard *editable* install:
+
+   ```powershell
+   # Pick a location under the project for third-party code
+   mkdir external_apps
+   cd external_apps
+
+   # Clone the repo (or download the zip and extract)
+   git clone https://github.com/jakeoneijk/FlashSR_Inference.git
+
+   # Install it into the current Python environment (must already have PyTorch)
+   cd FlashSR_Inference
+   pip install -e .
+   ```
+
+   That's it—no bash scripts required.  As long as PyTorch is present the package will import correctly on Windows, Linux, or macOS.
 
 ---
 ## Stand-Alone Usage
 ```bash
 python extensions/flashsr_extension.py \
        --input outputs/0003_vocals_only     \
+       --output enhanced/                   \
+       --chunk_seconds 5.12 --batch_size 4  \
        --device cuda                        # or cpu
 ```
 Arguments:
 * `--input`  – Path to a single WAV **or** a directory that represents the processed-root for a call.
 * `--model_dir`  – Optional path to checkpoints; omit to auto-download.
 * `--device`  – `cuda`, `cuda:0`, `cpu`, etc.
+* `--output` – Folder where enhanced files are written (default: alongside input).
+* `--chunk_seconds` – Chunk length (seconds) for processing with the upstream model (default 5.12).
+* `--batch_size` – Number of chunks processed simultaneously on GPU (default 4).
 
 For each low-quality WAV the extension writes `<stem>_flashsr.wav` in the same folder.
 
@@ -54,7 +78,8 @@ python pipeline_orchestrator.py --input mycall.wav --flashsr --device cuda
 2. **Quality Detection**  
    – Any file with `sample_rate < 32000` triggers enhancement.  
 3. **FlashSR Inference**  
-   – Audio is processed on the chosen device; output retains the original SR (or 48 kHz in fallback mode).  
+   – Wrapper path processes whole file; upstream model is fed stereo in 5.12-s chunks with GPU batches for speed.  
+   – Output retains the original sample-rate.  
 4. **Manifest Update**  
    – Each enhancement appends an entry under `"enhancements"` with anonymised fields.
 

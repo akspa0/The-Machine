@@ -35,6 +35,7 @@ Tracks current work focus, recent changes, next steps, and active decisions/cons
   - Default confidence raised to 0.54; chunk length default 5 s.
   - Script ≤250 LOC and now the canonical way to cut long recordings before feeding PipelineOrchestrator.
 - `cut_and_process.py` updated to call the new cutter and pipe the segments directly into the pipeline.
+- **NEW (2025-06-12):** Added FlashSR super-resolution extension (`flashsr_extension.py`) with automatic weight download, GPU batching, and chunked processing. Integrated optional `--flashsr` flag and output folder support. Added profanity Bleeper extension (`bleeper_extension.py`) auto-invoked in finalization to censor first 180 s.
 
 ## Recent Changes
 
