@@ -195,34 +195,45 @@ class PipelineOrchestrator:
                     self.log_event('INFO', 'file_skipped_too_short', {
                         'input_name': file.name,
                         'duration': duration,
-                        'message': 'File skipped for diarization: <10s duration or unreadable'
+                        'message': 'File skipped: <10s duration or unreadable'
                     })
                     continue
+
+                # --- NEW LOGIC ----------------------------------------------------
+                # Only treat as "conversation" when filename actually starts with
+                # "out-" *and* the user did not request processing of out-files.
+                # Otherwise, schedule a normal separation job so downstream stages
+                # receive proper *-vocals.wav stems.
                 if file.name.startswith('out-') and not self.process_out_files:
-                    self.log_event('INFO', 'file_skipped_out_prefix', {
-                        'input_name': file.name,
-                        'message': "File skipped for diarization: starts with 'out-' (processing disabled)"
-                    })
-                    continue
-                single_file_count += 1
-                call_id = file.stem.split('-')[0]
-                separated_dir = self.run_folder / 'separated' / call_id
-                separated_dir.mkdir(parents=True, exist_ok=True)
-                conversation_file = separated_dir / f"{call_id}-conversation.wav"
-                try:
-                    audio, sr = sf.read(str(file))
-                    sf.write(str(conversation_file), audio, sr)
-                    self.log_event('INFO', 'single_file_ready_for_diarization', {
-                        'input_file': str(file),
-                        'output_file': str(conversation_file),
-                        'call_id': call_id,
-                        'message': 'Complete conversation file, skipped separation'
-                    })
-                except Exception as e:
-                    self.log_event('ERROR', 'single_file_preparation_failed', {
-                        'input_file': str(file),
-                        'error': str(e)
-                    })
+                    # Existing behaviour: copy as conversation file for diarization
+                    single_file_count += 1
+                    call_id = file.stem.split('-')[0]
+                    separated_dir = self.run_folder / 'separated' / call_id
+                    separated_dir.mkdir(parents=True, exist_ok=True)
+                    conversation_file = separated_dir / f"{call_id}-conversation.wav"
+                    try:
+                        audio, sr = sf.read(str(file))
+                        sf.write(str(conversation_file), audio, sr)
+                        self.log_event('INFO', 'single_file_ready_for_diarization', {
+                            'input_file': str(file),
+                            'output_file': str(conversation_file),
+                            'call_id': call_id,
+                            'message': 'Complete conversation file, skipped separation'
+                        })
+                    except Exception as e:
+                        self.log_event('ERROR', 'single_file_preparation_failed', {
+                            'input_file': str(file),
+                            'error': str(e)
+                        })
+                else:
+                    # Schedule for separation like normal
+                    job_data = {
+                        'input_path': str(file),
+                        'input_name': file.name
+                    }
+                    job_id = f"separate_{file.stem}"
+                    self.jobs.append(Job(job_id=job_id, data=job_data, job_type='separate'))
+                    separation_job_count += 1
         
         self.log_event('INFO', 'separation_jobs_created', {
             'separation_job_count': separation_job_count,

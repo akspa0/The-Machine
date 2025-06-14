@@ -28,4 +28,19 @@
 
 - **Documentation and Memory Bank:**
   - The memory bank must always reflect the current codebase, extension ecosystem, and system architecture.
-  - Outdated or legacy content should be archived and not referenced in active documentation. 
+  - Outdated or legacy content should be archived and not referenced in active documentation.
+
+- **External Tools Pattern:**
+  - Third-party projects are cloned into `external_apps/<tool>/` and installed locally via editable pip installs (`pip install -e external_apps/<tool>`). Wrapper scripts (≤250 LOC) live in `tools/` and invoke these local installs. This ensures latest upstream versions while keeping project-relative paths.
+
+- **Extension Registry Pattern:**
+  - All extension scripts subclass `ExtensionBase`. During import, subclasses auto-register into a global dictionary keyed by `name` (or class name).
+  - Orchestrator can call `extension_base.run_extensions_for_stage(output_root, stage)` to execute all extensions targeting that stage.
+  - Each extension declares `stage` metadata so ordering/selection is transparent and configurable.
+
+## Draft rules for finalisation sub-stage extensions (not enforced yet)
+• Naming convention: `stage = "finalise.F#"` where `F#` is F0–F4.
+• Extension can declare `call_scope = "per_tuple" | "per_call" | "global"`.
+• CLI flags (comma-delimited) will map to lists of extension *names*.
+• `--skip-calls` / `--only-calls` accept indexes or ranges (e.g., 0001,0003-0005).
+• Pipeline must respect privacy rule: skip-list evaluation must happen before any logging. 

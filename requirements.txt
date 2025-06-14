@@ -32,7 +32,8 @@ huggingface_hub
 # (CLAP is available via transformers >=4.30.0)
 
 # Parakeet ASR (NVIDIA NeMo)
-nemo_toolkit[asr]>=1.22.0
+# NVIDIA NeMo – ASR + TTS support
+nemo_toolkit[asr,tts]>=1.22.0
 
 # Whisper ASR
 openai-whisper
@@ -48,6 +49,21 @@ ipython
 
 # Optional: for logging, YAML config, etc.
 # pyyaml, colorama already included 
+
+# FlashSR super-resolution
+git+https://github.com/jakeoneijk/FlashSR_Inference
+
+# Better Profanity
+better_profanity
+
+# Added for Auto-Editor extension wrapper
+auto-editor>=28.0.0
+
+# Vision-language & image processing
+pillow>=10.0.0
+
+# Faster Whisper
+faster-whisper>=0.10.0
 
 # ---
 # Conda installation instructions (recommended for PyTorch):

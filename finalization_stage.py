@@ -10,6 +10,7 @@ import glob
 import subprocess
 import datetime
 import re
+from extensions.bleeper_extension import BleeperExtension
 
 def sanitize_filename(name, max_length=48):
     name = name.strip().replace(' ', '_')
@@ -190,17 +191,34 @@ def run_finalization_stage(run_folder: Path, manifest: list):
         with open(show_desc_path, 'r', encoding='utf-8') as f:
             show_desc = f.read().strip()
     show_mp3 = show_dir / (show_title + '.mp3')
+    show_bleeped_wav = show_dir / 'show_bleeped.wav'
+    show_bleeped_mp3 = show_dir / (show_title + '_bleeped.mp3')
+
     if show_wav.exists():
+        # 1. Convert original
         wav_to_mp3(show_wav, show_mp3)
         embed_id3(show_mp3, {
             'title': show_title,
             'album': 'Audio Context Show',
             'comment': show_desc,
         })
-        # Only use show-level metadata for the show MP3; do not use 'entry' from previous loop
-        original_title = show_title or 'unknown_source'
-        # Defensive: do not use start_time/end_time from 'entry' (not defined here)
-        embed_lineage_id3(show_mp3, original_title)
+        embed_lineage_id3(show_mp3, show_title or 'unknown_source')
+
+        # 2. Run bleeper to create censored version (keeps original untouched)
+        try:
+            BleeperExtension(output_root=show_dir).run()
+        except Exception as e:
+            print(f"[WARN] BleeperExtension failed: {e}")
+
+        # 3. Convert bleeped wav to mp3 if it exists
+        if show_bleeped_wav.exists():
+            wav_to_mp3(show_bleeped_wav, show_bleeped_mp3)
+            embed_id3(show_bleeped_mp3, {
+                'title': show_title + ' (Bleeped)',
+                'album': 'Audio Context Show',
+                'comment': show_desc,
+            })
+            embed_lineage_id3(show_bleeped_mp3, show_title or 'unknown_source')
     # --- 3. Show TXT ---
     def format_hms(seconds):
         return str(datetime.timedelta(seconds=int(seconds)))

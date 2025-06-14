@@ -3,6 +3,7 @@ import json
 import hashlib
 from pathlib import Path
 import subprocess
+from typing import List
 
 # Tokenization utility for chunking
 try:
@@ -11,8 +12,8 @@ try:
         try:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
-            print(f"[WARN] tiktoken: Unknown model '{model}', falling back to 'gpt-3.5-turbo' encoding.")
-            enc = tiktoken.encoding_for_model("gpt-3.5-turbo")
+            # Unknown model; default to cl100k_base silently
+            enc = tiktoken.get_encoding("cl100k_base")
         tokens = enc.encode(text)
         chunks = []
         for i in range(0, len(tokens), max_tokens):
@@ -37,9 +38,9 @@ def run_llm_task(prompt, config, output_path=None, seed=None, chunking=True, sin
     """
     base_url = config.get('lm_studio_base_url', 'http://localhost:1234/v1')
     api_key = config.get('lm_studio_api_key', 'lm-studio')
-    model_id = config.get('lm_studio_model_identifier', 'llama-3.1-8b-supernova-etherealhermes')
+    model_id = config.get('lm_studio_model_identifier', 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b')
     temperature = config.get('lm_studio_temperature', 0.5)
-    max_tokens = config.get('lm_studio_max_tokens', 2048)
+    max_tokens = config.get('lm_studio_max_tokens', 8192)
     headers = {
         'Authorization': f'Bearer {api_key}',
         'Content-Type': 'application/json'
@@ -258,4 +259,56 @@ if __name__ == '__main__':
         Path(args.output_file).write_text(result, encoding='utf-8')
         print(f'[INFO] Wrote result to {args.output_file}')
     else:
-        print(result) 
+        print(result)
+
+# ---------------------------------------------------------------------------
+#  Simple LLM Task Manager (pipeline-friendly helper)
+# ---------------------------------------------------------------------------
+
+
+class LLMTaskManager:
+    """Queue and run multiple LLM tasks in sequence.
+
+    This lightweight helper is *stateless* – results are returned to the caller
+    but you can also optionally persist each task's output to a file for
+    downstream extensions.
+    """
+
+    def __init__(self, llm_config: dict):
+        self.llm_config = llm_config
+        self.tasks = []  # list of (prompt, kwargs)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def add(self, prompt: str, *, output_path: str | Path | None = None, **kwargs):
+        """Queue a prompt for later execution.
+
+        Additional **kwargs are forwarded to `run_llm_task` (e.g. single_output,
+        chunking, system_prompt, seed, etc.).
+        """
+        self.tasks.append((prompt, dict(output_path=output_path, **kwargs)))
+
+    def run_all(self) -> List[str]:
+        """Execute all queued tasks and return list of results in order."""
+        results: List[str] = []
+        for prompt, kw in self.tasks:
+            res = run_llm_task(prompt, self.llm_config, **kw)
+            results.append(res)
+        return results
+
+    # Convenience classmethod ------------------------------------------------
+
+    @classmethod
+    def run(cls, tasks: List[dict], llm_config: dict) -> List[str]:
+        """Fire-and-forget helper.
+
+        *tasks* is a list of dicts with at minimum a ``prompt`` key and any
+        optional arguments accepted by :func:`run_llm_task`.
+        """
+        mgr = cls(llm_config)
+        for task in tasks:
+            prompt = task.pop("prompt")
+            mgr.add(prompt, **task)
+        return mgr.run_all() 
