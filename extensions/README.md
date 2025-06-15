@@ -100,6 +100,49 @@ Below are the main extensions included in this project. Each can be run independ
   python extensions/llm_utils.py --help
   ```
 
+## 🎛️ New Audio Collage & Separation Extensions
+
+### 🔀 `vocal_separation_extension.py`
+* **Purpose:** Runs the open-source `audio-separator` model to create `*-vocals.wav` / `*-instrumental.wav` stems for every WAV in `renamed/`.
+* **Auto-Invoke:** Extensions that need stems (phrase/word timestamps, collages) should call this automatically if no `separated/` folder exists.
+* **CLI:**
+  ```sh
+  # Single run
+  python extensions/vocal_separation_extension.py outputs/run-20250611-000850
+
+  # Process ALL run-* folders inside outputs/
+  python extensions/vocal_separation_extension.py outputs/ --all-runs
+  ```
+
+### 🗣️ `word_timestamp_extension.py`
+* Generates word-level timestamps for each **speaker** (concatenated vocal segments) using Whisper or Parakeet.
+* Outputs to `word_ts_whisper/` (or `word_ts_parakeet/`).
+
+### 🗨️ `phrase_timestamp_extension.py`
+* Copies speaker segments into `phrase_ts/<call>/<channel>/<speaker>/` and writes a JSON manifest (start/end, transcript).
+* Provides the phrase library used by the collage extensions.
+
+### 🎵 `phrase_collage_extension.py`
+* Builds surreal sentences **per speaker** by asking a local LLM to pick phrase IDs.
+* Concatenates chosen phrases → `phrase_collage/…/phrase_collage.wav`.
+* Writes `montage_plan.txt` (ID lines) and `montage_text.txt` (human-readable).
+  ```sh
+  python extensions/phrase_collage_extension.py outputs/run-20250611-000850 \
+      --sentences 5 --phrases-per-sentence 3
+  ```
+
+### 🌐 `multi_speaker_collage_extension.py`
+* NEW! Remixes phrases **across all speakers** (and optionally across every `run-*` folder) to form multi-voice sentences.
+* Flags:
+  * `--all-runs` Include every run inside `outputs/` or siblings of the given run folder.
+  * `--distinct-speakers` Force each sentence to use phrases from different speakers.
+* Example:
+  ```sh
+  python extensions/multi_speaker_collage_extension.py outputs/ --all-runs \
+      --sentences 4 --phrases-per-sentence 4 --distinct-speakers
+  ```
+* Falls back to a random plan if the LLM cannot comply.
+
 ---
 
 ## 🏗️ How Extensions Use Context

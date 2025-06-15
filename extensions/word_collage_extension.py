@@ -9,10 +9,13 @@ folder, one text file per speaker.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import json
 import re
 import sys as _sys
+import random
+from better_profanity import profanity
+from collections import Counter
 
 # Ensure project root on sys.path when run directly -----------------------
 _ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +35,8 @@ def _clean_words(raw: List[str]) -> List[str]:
         word = re.sub(r"[^A-Za-z']", "", w)  # keep apostrophes
         if not word:
             continue
+        if profanity.contains_profanity(word.lower()):
+            continue  # skip curse words
         lw = word.lower()
         if lw not in seen:
             seen.add(lw)
@@ -56,10 +61,20 @@ class WordCollageExtension(ExtensionBase):
         model_size: str = "base",
         device: str | None = None,
         compute_type: str = "float16",
+        lofi: bool = False,
+        engine: str = "whisper",
+        word_gap: float = 0.2,
+        sentence_gap: float = 0.5,
+        min_word_dur: float = 0.12,
         **_: Any,
     ) -> None:
         super().__init__(output_root)
         self.sentences = sentences
+        self.lofi = lofi
+        self.engine = engine.lower()
+        self.word_gap = word_gap
+        self.sentence_gap = sentence_gap
+        self.min_word_dur = min_word_dur
         self.llm_config_path = Path(llm_config) if llm_config else Path("workflows/llm_tasks.json")
         if not self.llm_config_path.exists():
             raise FileNotFoundError(f"LLM config JSON not found: {self.llm_config_path}")
@@ -69,14 +84,17 @@ class WordCollageExtension(ExtensionBase):
         # Store Whisper params for potential auto-run of timestamp extension
         self._ts_params = dict(model_size=model_size, device=device, compute_type=compute_type)
 
+        # after bootstrap ensure profanity list loaded (reuse bleeper default)
+
     # ------------------------------------------------------------------
     def run(self):
-        word_root = Path(self.output_root) / "word_ts"
+        word_root = Path(self.output_root) / f"word_ts_{self.engine}"
         if not word_root.exists():
             self.log("word_ts/ not found – running WordTimestampExtension automatically …")
             WordTimestampExtension(
                 self.output_root,
                 **self._ts_params,
+                engine=self.engine,
             ).run()
             if not word_root.exists():
                 self.log("WordTimestampExtension did not create word_ts; aborting collage.")
@@ -98,17 +116,42 @@ class WordCollageExtension(ExtensionBase):
             call_id, channel, speaker = parts[0], parts[1], parts[2]
             words_data = json.loads(speaker_json.read_text(encoding="utf-8"))
             words_list = _clean_words([w["word"] for w in words_data if isinstance(w.get("word"), str)])
-            if len(words_list) < 10:
+            random.shuffle(words_list)
+            if len(words_list) < 5:
+                self.log(f"[INFO] Skipping {call_id}/{channel}/{speaker} – only {len(words_list)} usable words after filters")
                 continue  # not enough material
 
+            # ---- Extract frequent phrases from speaker transcript ---------
+            word_dir = word_root.joinpath(*parts[:3])
+            transcript_txt = word_dir / "transcript.txt"
+            phrases: List[str] = []
+            if transcript_txt.exists():
+                text = transcript_txt.read_text(encoding="utf-8").lower()
+                tokens = [re.sub(r"[^a-z']", "", t) for t in text.split()]
+                tokens = [t for t in tokens if t and not profanity.contains_profanity(t)]
+                # build bigrams and trigrams
+                ngrams: List[str] = []
+                for n in (2, 3):
+                    for i in range(len(tokens)-n+1):
+                        ng = " ".join(tokens[i:i+n])
+                        ngrams.append(ng)
+                common = [p for p,count in Counter(ngrams).items() if count>=2][:20]
+                phrases = common
+
             prompt = (
-                "SYSTEM:\n"  # will be turned into system_prompt param
-                "You are a Dadaist playwright constructing bizarre, surreal yet *pronounceable* sentences. "
-                "RULES: Use ONLY the supplied words, do NOT invent new tokens, you may repeat words, but result must be "
-                f"{self.sentences} distinct sentences separated by newline. Keep it weird but grammatically valid."
+                "SYSTEM:\n"  # passed via system_prompt param
+                "You are a Dadaist playwright constructing bizarre, surreal yet *pronounceable* sentences.\n"
+                "STRICT RULES:\n"
+                "1. Use ONLY the words provided in the list (case-insensitive).\n"
+                "2. Feel free to repeat words or change order, but you MUST NOT reproduce any original phrase—"
+                "avoid keeping three or more consecutive words in the same order they appear in the list.\n"
+                "3. Generate precisely " + str(self.sentences) + " sentences, each on its own line.\n"
+                "4. Embrace surrealist humour and unexpected combinations." 
             )
 
             user_prompt = "Word library:\n" + ", ".join(words_list)
+            if phrases:
+                user_prompt += "\n\nAvailable phrases (optional):\n" + "; ".join(phrases)
             out_dir = self.out_root / call_id / channel / speaker
             out_dir.mkdir(parents=True, exist_ok=True)
             out_txt = out_dir / "collage.txt"
@@ -158,10 +201,16 @@ class WordCollageExtension(ExtensionBase):
             if not lines:
                 continue
 
-            speaker_dir = collage_txt.parent
-            words_json_path = speaker_dir / "words.json"
-            audio_path = speaker_dir / "speaker_audio.wav"
+            collage_dir = collage_txt.parent
+            # Map collage path back to word_ts directory
+            rel_parts = collage_dir.relative_to(self.out_root).parts  # (call, channel, speaker)
+            if len(rel_parts) < 3:
+                continue
+            word_dir = word_root.joinpath(*rel_parts)
+            words_json_path = word_dir / "words.json"
+            audio_path = word_dir / "speaker_audio.wav"
             if not (words_json_path.exists() and audio_path.exists()):
+                self.log(f"Missing word assets for {'/'.join(rel_parts)} – skipping audio.")
                 continue
 
             word_entries = json.loads(words_json_path.read_text(encoding="utf-8"))
@@ -178,7 +227,10 @@ class WordCollageExtension(ExtensionBase):
                 audio = audio.mean(axis=1)
 
             sentence_audios: List[np.ndarray] = []
-            silence = np.zeros(int(sr * 0.15), dtype=audio.dtype)
+            word_sil = np.zeros(int(sr * self.word_gap), dtype=audio.dtype)
+            sent_sil = np.zeros(int(sr * self.sentence_gap), dtype=audio.dtype)
+
+            usage_counter: Dict[str, int] = {}
 
             for sentence in lines:
                 sentence_audio_parts: List[np.ndarray] = []
@@ -187,31 +239,49 @@ class WordCollageExtension(ExtensionBase):
                     entries = word_map.get(key)
                     if not entries:
                         continue  # skip missing
-                    start, end = entries[0]  # first occurrence
+
+                    idx = usage_counter.get(key, 0)
+                    if idx >= len(entries):
+                        idx = 0  # loop if exceeds occurrences
+                    usage_counter[key] = idx + 1
+
+                    start, end = entries[idx]
                     start_idx = int(start * sr)
                     end_idx = int(end * sr)
                     if start_idx >= end_idx or end_idx > len(audio):
                         continue
+                    dur = (end_idx - start_idx)/sr
+                    if dur < self.min_word_dur:
+                        continue  # too short, unintelligible
                     segment = audio[start_idx:end_idx]
-                    sentence_audio_parts.extend([segment, silence])
+                    sentence_audio_parts.extend([segment, word_sil])
                 if sentence_audio_parts:
                     sentence_audio = np.concatenate(sentence_audio_parts)
                     # a bit longer silence after sentence
-                    sentence_audios.extend([sentence_audio, np.zeros(int(sr*0.4), dtype=audio.dtype)])
+                    sentence_audios.extend([sentence_audio, sent_sil])
 
             if not sentence_audios:
                 continue
             final_audio = np.concatenate(sentence_audios)
-            out_wav = speaker_dir / "collage.wav"
+
+            # Optional lo-fi degradation
+            if self.lofi:
+                import librosa
+                final_audio = librosa.resample(final_audio, orig_sr=sr, target_sr=8000)
+                sr = 8000
+                # 8-bit quantization
+                final_audio = (np.round((final_audio + 1) * 127) - 128).astype(np.int8).astype(np.float32) / 128.0
+
+            out_wav = collage_dir / ("collage_lofi.wav" if self.lofi else "collage.wav")
             sf.write(str(out_wav), final_audio, sr)
             self.log(f"Wrote {out_wav.relative_to(self.out_root)}")
             # update manifest
             self._add_manifest(
-                call_id=speaker_dir.parents[3].name,  # word_ts/<call>/<channel>/<speaker>
-                channel="/".join(speaker_dir.parts[-3:]),
-                input_file=str(audio_path),
+                call_id=rel_parts[0],  # word_ts/<call>/<channel>/<speaker>
+                channel="/".join(rel_parts[1:]),
+                input_file=str(words_json_path),
                 output_file=str(out_wav),
-                metadata={"duration_sec": len(final_audio)/sr},
+                metadata={"duration_sec": len(final_audio)/sr, "lofi": self.lofi},
             )
 
 # ---------------------------------------------------------------------------
@@ -224,6 +294,11 @@ def main() -> None:  # pragma: no cover
     p.add_argument("run_folder", type=str, help="Path to outputs/run-* folder")
     p.add_argument("--llm-config", type=str, help="Optional JSON with llm_config + tasks", default=None)
     p.add_argument("--sentences", type=int, default=12, help="Number of sentences per speaker (default 12)")
+    p.add_argument("--lofi", action="store_true", help="Output 8kHz 8-bit lo-fi WAV")
+    p.add_argument("--word-gap", type=float, default=0.2, help="Silence between words (sec, default 0.2)")
+    p.add_argument("--sentence-gap", type=float, default=0.5, help="Silence between sentences (sec, default 0.5)")
+    p.add_argument("--min-word-dur", type=float, default=0.12, help="Minimum duration in seconds for a word sample (default 0.12)")
+    p.add_argument("--engine", choices=["whisper","parakeet"], default="whisper", help="ASR engine to use")
     # Ignored but accepted for parity with user call
     p.add_argument("--device", default="auto", help=argparse.SUPPRESS)
     p.add_argument("--model-size", default="base", help="Whisper model size for auto timestamping")
@@ -237,6 +312,11 @@ def main() -> None:  # pragma: no cover
         model_size=args.model_size,
         device=None if args.device == "auto" else args.device,
         compute_type=args.compute_type,
+        lofi=args.lofi,
+        engine=args.engine,
+        word_gap=args.word_gap,
+        sentence_gap=args.sentence_gap,
+        min_word_dur=args.min_word_dur,
     )
     ext.run()
 

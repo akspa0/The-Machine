@@ -12,7 +12,7 @@ import numpy as np
 
 """
 Usage:
-    python character_persona_builder.py <output_root> [--llm-config <config_path>]
+    python character_persona_builder.py <output_root> [--llm-config <config_path>] [--include-left]
 
 For each call_id in <output_root>/speakers/:
 - If left-vocals/right-vocals are present, merges all speakers per channel and generates one persona per channel.
@@ -110,11 +110,13 @@ def create_audio_clips(wav_files, out_dir, speaker_id):
     return outputs
 
 class CharacterPersonaBuilder(ExtensionBase):
-    def __init__(self, output_root, llm_config_path=None, max_tokens=4096):
+    def __init__(self, output_root, llm_config_path=None, max_tokens=4096, include_left_vocals=False):
         super().__init__(output_root)
         self.llm_config_path = llm_config_path or 'workflows/llm_tasks.json'
         self.llm_config = self._load_llm_config()
         self.max_tokens = max_tokens
+        # Whether to also process left-vocals channel; default is right-vocals only
+        self.include_left_vocals = include_left_vocals
 
     def _load_llm_config(self):
         config_path = Path(self.llm_config_path)
@@ -128,9 +130,9 @@ class CharacterPersonaBuilder(ExtensionBase):
         return {
             'lm_studio_base_url': 'http://localhost:1234/v1',
             'lm_studio_api_key': 'lm-studio',
-            'lm_studio_model_identifier': 'llama-3.1-8b-supernova-etherealhermes',
+            'lm_studio_model_identifier': 'l3-grand-horror-ii-darkest-hour-uncensored-ed2.15-15b',
             'lm_studio_temperature': 0.5,
-            'lm_studio_max_tokens': 2048
+            'lm_studio_max_tokens': 8192
         }
 
     def get_call_title(self, call_id):
@@ -195,6 +197,10 @@ class CharacterPersonaBuilder(ExtensionBase):
                 if not channel_folder.is_dir():
                     continue
                 channel = channel_folder.name
+                # By default, skip left-vocals unless user explicitly enables it
+                if channel == 'left-vocals' and not self.include_left_vocals:
+                    self.log(f"[SKIP] left-vocals channel skipped by default in {call_id}. Use --include-left to enable.")
+                    continue
                 for speaker_folder in channel_folder.iterdir():
                     if not speaker_folder.is_dir() or not speaker_folder.name.startswith('S'):
                         continue
@@ -258,7 +264,8 @@ if __name__ == "__main__":
     parser.add_argument('output_root', type=str, help='Root output folder (parent of speakers/)')
     parser.add_argument('--llm-config', type=str, default=None, help='Path to LLM config JSON (default: workflows/llm_tasks.json)')
     parser.add_argument('--max-tokens', type=int, default=4096, help='Max tokens per LLM chunk (default: 4096, max: 8192).')
+    parser.add_argument('--include-left', action='store_true', help='Also process left-vocals channel (default: disabled)')
     args = parser.parse_args()
     max_tokens = min(args.max_tokens, 8192)
-    ext = CharacterPersonaBuilder(args.output_root, llm_config_path=args.llm_config, max_tokens=max_tokens)
+    ext = CharacterPersonaBuilder(args.output_root, llm_config_path=args.llm_config, max_tokens=max_tokens, include_left_vocals=args.include_left)
     ext.run() 

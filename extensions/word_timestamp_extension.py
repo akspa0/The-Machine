@@ -15,6 +15,8 @@ from typing import List, Dict, Any, Optional
 import json
 import argparse
 import sys
+import subprocess
+import tempfile
 
 # Add project root to sys.path when running directly ------------------------
 from pathlib import Path
@@ -86,6 +88,7 @@ class WordTimestampExtension(ExtensionBase):
         model_size: str = "base",
         device: str | None = None,
         compute_type: str = "float16",
+        engine: str = "whisper",
         llm_config: Optional[Path] = None,
         **_: Any,
     ) -> None:
@@ -94,12 +97,13 @@ class WordTimestampExtension(ExtensionBase):
         self.device = device or ("cuda" if device is None else device)
         self.compute_type = compute_type
         self.llm_config_path = Path(llm_config) if llm_config else None
+        self.engine = engine.lower()
 
         # Lazy-initialise Whisper
-        self.model: Optional[WhisperModel] = None
+        self.model: Optional[WhisperModel] = None  # whisper model (loaded on demand)
 
         # Prepare out directory
-        self.out_root = Path(self.output_root) / "word_ts"
+        self.out_root = Path(self.output_root) / f"word_ts_{self.engine}"
         self.out_root.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -107,12 +111,8 @@ class WordTimestampExtension(ExtensionBase):
     # ------------------------------------------------------------------
 
     def run(self):
-        self.log("Loading Whisper model …")
-        self.model = WhisperModel(
-            self.model_size,
-            device=self.device,
-            compute_type=self.compute_type,
-        )
+        if self.engine == "whisper":
+            self._load_whisper()
 
         speakers_root = Path(self.output_root) / "speakers"
         if not speakers_root.exists():
@@ -169,9 +169,16 @@ class WordTimestampExtension(ExtensionBase):
 
                     self.log(f"Transcribing {concat_path.relative_to(self.out_root)}")
                     try:
-                        words = transcribe_with_whisper(concat_path, self.model)
+                        if self.engine == "whisper":
+                            words = transcribe_with_whisper(concat_path, self.model)
+                        else:
+                            words = self._transcribe_with_parakeet(concat_path)
+                            if not words:  # fallback
+                                self.log("[WARN] Parakeet failed; falling back to Whisper for %s" % concat_path.name)
+                                self._load_whisper()
+                                words = transcribe_with_whisper(concat_path, self.model)
                     except Exception as e:
-                        self.log(f"[ERROR] Whisper failed on {concat_path.name}: {e}")
+                        self.log(f"[ERROR] {self.engine} failed on {concat_path.name}: {e}")
                         continue
 
                     json_path = out_dir / "words.json"
@@ -256,6 +263,42 @@ class WordTimestampExtension(ExtensionBase):
         mgr.run_all()
         self.log("LLM tasks completed.")
 
+    def _transcribe_with_parakeet(self, audio_path: Path) -> List[Dict[str, Any]]:
+        """Use paddlespeech ASR cli to get word timestamps. Fallback: split evenly."""
+        try:
+            tmp_json = Path(tempfile.gettempdir()) / (audio_path.stem + "_asr.json")
+            cmd = [
+                "paddlespeech", "asr",
+                "--input", str(audio_path),
+                "--output", str(tmp_json),
+                "--word_time_stamp", "True",
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+            if tmp_json.exists():
+                data = json.loads(tmp_json.read_text(encoding="utf-8"))
+                words = []
+                for utt in data.get("result", []):
+                    words.extend(utt.get("words", []))
+                if words:
+                    # format to our schema
+                    return [
+                        {"word": w[0], "start": w[1], "end": w[2]} for w in words
+                    ]
+        except Exception as e:
+            self.log(f"[WARN] Parakeet ASR failed: {e}")
+        # fallback: no data
+        return []
+
+    def _load_whisper(self):
+        """Load WhisperModel lazily once."""
+        if self.model is None:
+            self.log("Loading Whisper model …")
+            self.model = WhisperModel(
+                self.model_size,
+                device=self.device,
+                compute_type=self.compute_type,
+            )
+
 
 # ---------------------------------------------------------------------------
 # Stand-alone CLI
@@ -268,6 +311,7 @@ def main() -> None:  # pragma: no cover
     p.add_argument("--model-size", default="base", help="Whisper model size or path (default: base)")
     p.add_argument("--device", default="auto", help="cuda, cpu, or auto (default)")
     p.add_argument("--compute-type", default="float16", help="See faster-whisper compute_type (default: float16)")
+    p.add_argument("--engine", choices=["whisper", "parakeet"], default="whisper", help="ASR engine for word timestamps")
     p.add_argument("--llm-config", type=str, help="Optional JSON with llm_config + tasks for post-processing")
     args = p.parse_args()
 
@@ -276,6 +320,7 @@ def main() -> None:  # pragma: no cover
         model_size=args.model_size,
         device=None if args.device == "auto" else args.device,
         compute_type=args.compute_type,
+        engine=args.engine,
         llm_config=args.llm_config,
     )
     ext.run()
