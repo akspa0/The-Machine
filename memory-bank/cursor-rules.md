@@ -43,4 +43,6 @@
 • Extension can declare `call_scope = "per_tuple" | "per_call" | "global"`.
 • CLI flags (comma-delimited) will map to lists of extension *names*.
 • `--skip-calls` / `--only-calls` accept indexes or ranges (e.g., 0001,0003-0005).
-• Pipeline must respect privacy rule: skip-list evaluation must happen before any logging. 
+• Pipeline must respect privacy rule: skip-list evaluation must happen before any logging.
+
+- **NumPy Pin Rule (2025-06-16):** Until Numba ≥0.61 confirmed compatible, keep `numpy<=2.1.*`. Any environment setup must respect this pin; `transcription.py` contains a guard to enforce. 

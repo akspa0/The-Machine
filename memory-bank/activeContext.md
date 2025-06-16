@@ -10,17 +10,31 @@ Tracks current work focus, recent changes, next steps, and active decisions for 
 • 📦 Dependencies updated (`faster-whisper`).
 • ✅ Memory bank trimmed: only live features & roadmap retained.
 
+## Updates 2025-06-16
+
+• 🛠️ **Dependency hot-fix:** Added `numpy<=2.1.*` pin in `requirements.txt` because NeMo → Numba chain is incompatible with NumPy 2.2 +.  Also added early guard in `transcription.py` that aborts with a clear message when a higher NumPy version is detected.
+• 🔄 **ASR fallback path:** `transcription.py` now auto-falls back to Whisper when Parakeet import fails, preventing pipeline aborts.
+• 🐢 **Slow-tempo audio caveat:** A recent run used 0.25× speed audio; ASR produced zero transcripts. Decision pending: either pre-restore tempo (sox tempo 4.0) or accept transcript-less flow.
+
 ## Recent Changes
 
 - Extension registry & task manager stable.
 - Word-timestamp extension merged; extensions can safely assume granular transcripts.
 - Separation logic patched (see code 2025-06-14).
 
+## Recent Changes (addendum)
+
+- Dependency pin + runtime guard implemented (see above).
+
 ## Next Steps
 
 1. **Modular pipeline split (Phase-2)** – extract each stage into its own module (e.g. `separation_stage.py`).
 2. Introduce YAML pipeline config & stage registry.
 3. Continue database prototype after modular refactor lands.
+
+## Next Steps (amendment)
+
+4. Implement optional **tempo restore stage** or CLI flag (`--fix-tempo 4.0`) before separation to handle slowed recordings.
 
 ## Active Decisions & Considerations
 

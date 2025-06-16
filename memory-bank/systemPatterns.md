@@ -21,6 +21,7 @@ Documents the system architecture, key technical decisions, design patterns, and
 - **Canonical Output Handling:** All outputs are named and stored in a standardized, traceable way, and tracked in the manifest.
 - **Prompt Caching:** Prompts and metadata are cached and reused for downstream workflows, ensuring consistency and traceability.
 - **Database-Ready:** The system is architected to support a future database for job/data management and reference lookups.
+- **Dependency Pins for Transitive Constraints:** When a downstream lib (e.g. NeMo → Numba) imposes a strict version cap, we explicitly pin the upstream library in `requirements.txt` (e.g. `numpy<=2.1.*`) and add an early runtime guard to fail fast if the constraint is violated.
 
 ## Design Patterns
 

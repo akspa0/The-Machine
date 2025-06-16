@@ -18,6 +18,18 @@ except ImportError:
 # If LLM chunking/tokenization is needed, import from llm_utils
 # from llm_utils import split_into_chunks_advanced
 
+# ------------------------------------------------------------------
+# Sanity-check NumPy version for NeMo/Numba compatibility
+# ------------------------------------------------------------------
+import numpy as _np  # noqa: N812 (internal alias)
+
+_NP_VERSION = tuple(map(int, _np.__version__.split(".")[:2]))
+if _NP_VERSION >= (2, 2):
+    raise RuntimeError(
+        "NumPy > 2.1 detected ({}). NVIDIA NeMo and Numba currently require "
+        "NumPy ≤ 2.1. Please downgrade: pip/conda install 'numpy<=2.1.*'".format(_np.__version__)
+    )
+
 def transcribe_segments(
     segments: List[Dict],
     config: Dict
@@ -32,6 +44,15 @@ def transcribe_segments(
     device = config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu')
     language = config.get('language', None)
     results = []
+
+    # -------------------------------------------------------------
+    # Fallback logic: if Parakeet requested but nemo_toolkit absent
+    # automatically switch to Whisper so the pipeline continues.
+    # -------------------------------------------------------------
+    if asr_engine == 'parakeet' and ASRModel is None:
+        print("[WARNING] Parakeet ASR requested but nemo_toolkit not installed. "
+              "Falling back to Whisper.")
+        asr_engine = 'whisper'
 
     if asr_engine == 'parakeet':
         if ASRModel is None:

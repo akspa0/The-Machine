@@ -14,7 +14,7 @@ torch>=2.0.0
 torchaudio>=2.0.0
 tqdm
 rich
-numpy
+numpy<=2.1.*  # Pinned: Numba/NeMo require ≤2.1 (NumPy 2.2+ breaks RNNT numba jit)
 soundfile
 mutagen
 pydub
