@@ -98,8 +98,7 @@ def separate_audio_file(input_file: Path, output_root: Path, model_path: str) ->
 def separate_audio_files(files: List[Path], output_root: Path, model_path: str) -> List[Dict]:
     results = []
     for file in files:
-        # Accept any regular WAV file; channel suffix check removed to support single-file inputs
-        if not file.is_file():
+        if not file.is_file() or not is_left_or_right(file.name):
             continue
         result = separate_audio_file(file, output_root, model_path)
         results.append(result)
@@ -114,7 +113,7 @@ def main():
     model_path = 'mel_band_roformer_vocals_fv4_gabox.ckpt'
     manifest = []
     for file in renamed_dir.iterdir():
-        if not file.is_file():
+        if not file.is_file() or not is_left_or_right(file.name):
             continue
         input_basename = file.stem
         out_subdir = separated_dir / input_basename

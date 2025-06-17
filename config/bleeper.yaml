@@ -1,0 +1,16 @@
+beep_frequency: 1000
+beep_volume_db: -3
+curse_words:
+- fuck
+- shit
+- bitch
+- asshole
+- bastard
+- cunt
+- dick
+- piss
+- bollocks
+- wanker
+- motherfucker
+max_seconds: 180
+mode: beep
