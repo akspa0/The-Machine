@@ -26,11 +26,13 @@ _ROOT = _CURR.parent.parent  # project root (one level above extensions/)
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
 
+# Prefer the standard OpenAI Whisper implementation. If unavailable, log an error
+# and disable this extension rather than requiring faster-whisper.
 try:
-    from faster_whisper import WhisperModel  # type: ignore
-except ImportError as exc:
-    print("❌ faster-whisper is required:  pip install faster-whisper", file=sys.stderr)
-    raise
+    import whisper  # type: ignore
+except ImportError:
+    whisper = None
+    print("❌ openai-whisper is required for WordTimestampExtension. Install with: pip install --upgrade --no-binary :all: openai-whisper", file=sys.stderr)
 
 from extensions.extension_base import ExtensionBase
 from extensions.llm_utils import LLMTaskManager  # Optional – only used if --llm-config supplied
@@ -39,31 +41,38 @@ from extensions.llm_utils import LLMTaskManager  # Optional – only used if --l
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def transcribe_with_whisper(audio_path: Path, model: WhisperModel) -> List[Dict[str, Any]]:
-    """Run Whisper with word_timestamps enabled and flatten into a list.
-
-    Returns list of dicts: {word, start, end, conf}
+def transcribe_with_whisper(audio_path: Path) -> List[Dict[str, Any]]:
+    """Transcribe *audio_path* with openai-whisper and approximate per-word
+    timestamps. Returns list of dicts: {word, start, end, confidence}
     """
-    # segments is a generator; we must iterate.
-    results = []
-    segments, _info = model.transcribe(
-        str(audio_path),
-        beam_size=5,
-        word_timestamps=True,
-        vad_filter=True,
-    )
+    if whisper is None:
+        raise RuntimeError("openai-whisper not available")
+    model = whisper.load_model("base", device="cuda" if whisper.cuda.is_available() else "cpu")
+    result = model.transcribe(str(audio_path), verbose=False)
+    segments = result.get("segments", []) or []
+    words: List[Dict[str, Any]] = []
     for seg in segments:
-        for w in seg.words:
-            results.append(
-                {
-                    "word": w.word,
-                    "start": w.start,
-                    "end": w.end,
-                    "confidence": getattr(w, "probability", None),
-                }
-            )
-    return results
+        words.extend(_segment_to_word_list(seg))
+    return words
 
+def _segment_to_word_list(segment: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Given a Whisper segment dict, split its text into words and assign
+    equally-spaced timestamps between the segment start/end.
+    """
+    words: List[Dict[str, Any]] = []
+    seg_text = segment.get("text", "").strip()
+    if not seg_text:
+        return words
+    tokens = seg_text.split()
+    if not tokens:
+        return words
+    start = float(segment.get("start", 0))
+    end = float(segment.get("end", start))
+    dur = (end - start) / max(len(tokens), 1)
+    for i, w in enumerate(tokens):
+        w_start = start + i * dur
+        words.append({"word": w, "start": w_start, "end": w_start + dur, "confidence": None})
+    return words
 
 # ---------------------------------------------------------------------------
 # Extension class
@@ -100,7 +109,7 @@ class WordTimestampExtension(ExtensionBase):
         self.engine = engine.lower()
 
         # Lazy-initialise Whisper
-        self.model: Optional[WhisperModel] = None  # whisper model (loaded on demand)
+        self.model: Optional[whisper.WhisperModel] = None  # whisper model (loaded on demand)
 
         # Prepare out directory
         self.out_root = Path(self.output_root) / f"word_ts_{self.engine}"
@@ -170,13 +179,13 @@ class WordTimestampExtension(ExtensionBase):
                     self.log(f"Transcribing {concat_path.relative_to(self.out_root)}")
                     try:
                         if self.engine == "whisper":
-                            words = transcribe_with_whisper(concat_path, self.model)
+                            words = transcribe_with_whisper(concat_path)
                         else:
                             words = self._transcribe_with_parakeet(concat_path)
                             if not words:  # fallback
                                 self.log("[WARN] Parakeet failed; falling back to Whisper for %s" % concat_path.name)
                                 self._load_whisper()
-                                words = transcribe_with_whisper(concat_path, self.model)
+                                words = transcribe_with_whisper(concat_path)
                     except Exception as e:
                         self.log(f"[ERROR] {self.engine} failed on {concat_path.name}: {e}")
                         continue
@@ -293,11 +302,7 @@ class WordTimestampExtension(ExtensionBase):
         """Load WhisperModel lazily once."""
         if self.model is None:
             self.log("Loading Whisper model …")
-            self.model = WhisperModel(
-                self.model_size,
-                device=self.device,
-                compute_type=self.compute_type,
-            )
+            self.model = whisper.load_model(self.model_size, device=self.device, compute_type=self.compute_type)
 
 
 # ---------------------------------------------------------------------------

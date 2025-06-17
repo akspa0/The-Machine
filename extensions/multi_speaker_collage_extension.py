@@ -23,6 +23,8 @@ import soundfile as sf
 from extensions.extension_base import ExtensionBase
 from extensions.llm_utils import run_llm_task
 
+# Additional audio formats accepted for --extra-audio-dir ingestion
+AUDIO_EXT = {'.wav', '.mp3', '.flac', '.ogg', '.m4a'}
 
 class MultiSpeakerCollageExtension(ExtensionBase):
     name = "multi_speaker_collage"
@@ -43,7 +45,11 @@ class MultiSpeakerCollageExtension(ExtensionBase):
         temperature: float = 0.6,
         include_speakers: List[str] | None = None,
         exclude_speakers: List[str] | None = None,
+        extra_audio_dirs: List[Path] | None = None,
+        out_dir: Path | None = None,
         llm_config: Path | None = None,
+        no_diarize: bool = False,
+        verbose: bool = False,
     ) -> None:
         super().__init__(output_root)
         self.output_root = Path(output_root)
@@ -57,8 +63,12 @@ class MultiSpeakerCollageExtension(ExtensionBase):
         self.temperature = temperature
         self.include_speakers = include_speakers or []
         self.exclude_speakers = exclude_speakers or []
+        self.extra_audio_dirs = extra_audio_dirs or []
+        self.no_diarize = no_diarize
+        self.verbose = verbose
 
-        self.out_root = self.output_root / "multi_speaker_collage"
+        # Resolve output root
+        self.out_root = Path(out_dir) if out_dir else self.output_root / "multi_speaker_collage"
         self.out_root.mkdir(parents=True, exist_ok=True)
 
         cfg_path = llm_config or Path("workflows/llm_tasks.json")
@@ -66,23 +76,52 @@ class MultiSpeakerCollageExtension(ExtensionBase):
 
         # Will be populated later
         self.global_phrases: List[Dict[str, Any]] = []  # each dict holds file, text, speaker_key
+        # Where temp files from extra dirs will be written
+        self._temp_dir = self.out_root / "_tmp_external"
+        self._temp_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _slugify(name: str) -> str:
+        """Return a filesystem-safe slug limited to ASCII, without trailing spaces/dots."""
+        import re, unicodedata
+
+        slug = unicodedata.normalize("NFKD", name)
+        slug = slug.encode("ascii", "ignore").decode("ascii")
+        slug = re.sub(r"[^A-Za-z0-9\-_.]+", "_", slug)  # replace illegal chars
+        slug = slug.strip(" .-_")  # trim problematic trailing chars
+        return slug[:64] or "unnamed"
+
     def run(self):
         self._collect_global_phrases()
+
+        # 1️⃣ Optionally ingest extra audio *before* we validate phrase availability
+        if self.extra_audio_dirs:
+            added = self._collect_phrases_from_external_dirs()
+            self.log(f"Added {added} phrases from extra audio dirs.")
+
+        # 2️⃣ Speaker include/exclude filters ----------------------------------------
+        if self.include_speakers:
+            self.global_phrases = [
+                p for p in self.global_phrases if any(tok in p["speaker"] for tok in self.include_speakers)
+            ]
+        if self.exclude_speakers:
+            self.global_phrases = [
+                p for p in self.global_phrases if not any(tok in p["speaker"] for tok in self.exclude_speakers)
+            ]
+
+        # 3️⃣ Validate after we tried every source -----------------------------------
         if len(self.global_phrases) < self.phrases_per_sentence:
             self.log("Not enough phrases collected; aborting.")
             return
 
-        # Apply speaker include/exclude filters -----------------------------------
-        if self.include_speakers:
-            self.global_phrases = [p for p in self.global_phrases if any(tok in p["speaker"] for tok in self.include_speakers)]
-        if self.exclude_speakers:
-            self.global_phrases = [p for p in self.global_phrases if not any(tok in p["speaker"] for tok in self.exclude_speakers)]
-
+        # 4️⃣ Shuffle phrases for variety and keep idx mapping consistent ------------
         random.shuffle(self.global_phrases)
+        for new_idx, phrase in enumerate(self.global_phrases):
+            phrase["idx"] = new_idx
+
         self.log(
-            f"Collected {len(self.global_phrases)} phrases after filtering from {'all runs' if self.all_runs else 'current run'} "
+            f"Collected {len(self.global_phrases)} phrases after filtering from {'all runs' if self.all_runs else 'current run'}"
         )
 
         plan_path = self.out_root / "montage_plan.txt"
@@ -316,6 +355,136 @@ class MultiSpeakerCollageExtension(ExtensionBase):
                 selected_lines.append(" ".join(tokens))
         return "\n".join(selected_lines)
 
+    # ------------------------------------------------------------------
+    # External audio helpers
+    # ------------------------------------------------------------------
+
+    def _collect_phrases_from_external_dirs(self) -> int:
+        """Diarize and transcribe loose audio files in *extra_audio_dirs*.
+
+        Returns number of phrases added.
+        """
+        import whisper  # type: ignore
+        diar_available = True
+        if not self.no_diarize:
+            try:
+                from speaker_diarization import batch_diarize, segment_speakers_from_diarization
+            except Exception as exc:
+                self.log(f"[WARN] Diarization deps missing: {exc} – running in --no-diarize mode.")
+                diar_available = False
+        else:
+            diar_available = False
+
+        count = 0
+        for audio_dir in self.extra_audio_dirs:
+            for src in Path(audio_dir).rglob('*'):
+                if not src.is_file() or src.suffix.lower() not in AUDIO_EXT:
+                    continue
+
+                # Convert non-wav to wav in temp folder
+                if src.suffix.lower() != '.wav':
+                    conv_wav = (self._temp_dir / self._slugify(src.stem)).with_suffix('.wav')
+                    conv_wav.parent.mkdir(parents=True, exist_ok=True)
+                    cmd = [
+                        'ffmpeg', '-y', '-i', str(src),
+                        '-ar', '44100', '-ac', '1', str(conv_wav)
+                    ]
+                    try:
+                        import subprocess
+                        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                        wav_path = conv_wav
+                    except Exception as exc:
+                        if self.verbose:
+                            self.log(f"⤫ ffmpeg failed for {src.name}: {exc}")
+                        continue
+                else:
+                    wav_path = src
+
+                safe_stem = self._slugify(wav_path.stem)
+                tmp_run = self._temp_dir / safe_stem
+                sep_dir = tmp_run / "separated"
+                diar_dir = tmp_run / "diarized"
+                speak_dir = tmp_run / "speakers"
+                for d in (sep_dir, diar_dir, speak_dir):
+                    d.mkdir(parents=True, exist_ok=True)
+
+                # Copy or link original to temp conversation path
+                conv_path = sep_dir / f"{wav_path.stem}-conversation.wav"
+                import shutil
+                try:
+                    shutil.copy2(wav_path, conv_path)
+                except Exception:
+                    continue
+
+                if diar_available:
+                    try:
+                        from speaker_diarization import batch_diarize, segment_speakers_from_diarization
+                        batch_diarize(str(sep_dir), str(diar_dir), min_speakers=2, max_speakers=2, progress=False)
+                        segment_speakers_from_diarization(str(diar_dir), str(sep_dir), str(speak_dir), progress=False)
+                    except Exception as exc:
+                        if self.verbose:
+                            self.log(f"⤫ diarization failed for {wav_path.name}: {exc}")
+                        diar_available = False  # fallback below
+
+                # Load Whisper once
+                wmodel = None
+                try:
+                    if not hasattr(self, "_whisper_checked"):
+                        self._whisper_model = whisper.load_model("base", device="cpu")
+                        self._whisper_checked = True
+                    wmodel = self._whisper_model
+                except Exception as exc:
+                    self.log(f"[WARN] Whisper unavailable ({exc}); falling back to filename captions.")
+                    self._whisper_checked = True
+
+                segment_files = list(speak_dir.rglob("*_16k.wav")) if diar_available else []
+
+                # Fallback: treat whole file as single segment
+                if not segment_files:
+                    segment_files = [conv_path]
+
+                for seg_wav in segment_files:
+                    if seg_wav.is_relative_to(speak_dir):
+                        rel = seg_wav.relative_to(speak_dir)
+                        speaker_key = str(rel.parent)
+                    else:
+                        speaker_key = f"external/{wav_path.stem}"
+
+                    txt_path = seg_wav.with_suffix(".txt")
+                    if wmodel is not None:
+                        try:
+                            result = wmodel.transcribe(str(seg_wav), verbose=False)
+                            text = result.get("text", "").strip()
+                            if self.verbose and not text:
+                                self.log(f"[VERBOSE] empty ASR result, will fallback to filename caption for {seg_wav.name}")
+                        except Exception as e:
+                            if self.verbose:
+                                self.log(f"⤫ whisper failed on {seg_wav.name}: {e}")
+                            text = ""
+                    else:
+                        text = ""
+                    if not text:
+                        import re
+                        text = re.sub(r'[\-_]+', ' ', seg_wav.stem).strip() or '(untitled)'
+                    try:
+                        txt_path.write_text(text, encoding='utf-8')
+                    except Exception as e:
+                        if self.verbose:
+                            self.log(f"⤫ could not write txt for {seg_wav.name}: {e}")
+                        pass
+                    self.global_phrases.append({
+                        "idx": len(self.global_phrases)+1,
+                        "text": text,
+                        "wav_path": seg_wav,
+                        "speaker": speaker_key,
+                    })
+                    count += 1
+                    if self.verbose:
+                        self.log(f"✓ added phrase '{text[:40]}' from {seg_wav.name}")
+        if self.verbose:
+            self.log(f"[VERBOSE] Added {count} phrases from external dirs (total inspected).")
+        return count
+
 
 # ---------------------------------------------------------------------------
 # Stand-alone CLI
@@ -324,8 +493,8 @@ class MultiSpeakerCollageExtension(ExtensionBase):
 def main() -> None:  # pragma: no cover
     import argparse
 
-    p = argparse.ArgumentParser(description="Create multi-speaker phrase collage from phrase_ts libraries.")
-    p.add_argument("run_folder", type=str, help="Path to outputs/run-* folder (used as current run)")
+    p = argparse.ArgumentParser(description="Create multi-speaker phrase collage from run folder and/or extra audio snippets.")
+    p.add_argument("run_folder", type=str, nargs="?", default=".", help="Path to outputs/run-* folder (default: current directory). Use '.' when only --extra-audio-dir is supplied.")
     p.add_argument("--all-runs", action="store_true", help="Include phrase_ts from ALL sibling run-* folders")
     p.add_argument("--distinct-speakers", action="store_true", help="Force each sentence to use phrases from different speakers")
     p.add_argument("--include-speakers", type=str, nargs="*", help="Only keep speakers containing these substrings (ANY match)")
@@ -336,6 +505,10 @@ def main() -> None:  # pragma: no cover
     p.add_argument("--preview-len", type=int, default=120, help="Chars shown per phrase preview in prompt")
     p.add_argument("--temperature", type=float, default=0.6, help="LLM temperature (default 0.6)")
     p.add_argument("--retries", type=int, default=3, help="LLM retry attempts if invalid output")
+    p.add_argument("--extra-audio-dir", type=str, action="append", help="Add loose audio files from DIR (recursive). Supports multiple.")
+    p.add_argument("--out-dir", type=str, help="Custom directory for collage outputs (will be created if absent)")
+    p.add_argument("--no-diarize", action="store_true", help="Skip speaker diarization for extra audio clips; treat each file as single phrase.")
+    p.add_argument("--verbose", action="store_true", help="Verbose diagnostic output")
     args = p.parse_args()
 
     MultiSpeakerCollageExtension(
@@ -350,6 +523,10 @@ def main() -> None:  # pragma: no cover
         retries=args.retries,
         include_speakers=args.include_speakers,
         exclude_speakers=args.exclude_speakers,
+        extra_audio_dirs=[Path(p) for p in (args.extra_audio_dir or [])],
+        out_dir=Path(args.out_dir) if args.out_dir else None,
+        no_diarize=args.no_diarize,
+        verbose=args.verbose,
     ).run()
 
 

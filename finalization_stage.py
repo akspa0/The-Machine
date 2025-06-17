@@ -648,4 +648,13 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                     if 'composer' in locals():
                         extra_tags['composer'] = composer
                     if extra_tags:
-                        embed_id3(mp3_path, extra_tags) 
+                        embed_id3(mp3_path, extra_tags)
+
+    # --------------------------------------------------------------
+    # Post-pipeline extensions (optional, non-blocking)
+    # --------------------------------------------------------------
+    try:
+        from extensions import extension_runner
+        extension_runner.run_all(run_folder)
+    except Exception as exc:
+        print(f"[EXT][WARN] Failed to execute extensions: {exc}") 

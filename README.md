@@ -128,4 +128,38 @@ See [`extensions/README.md`](./extensions/README.md) for more.
 
 ---
 
+## Auto-Editor Wrapper (`tm-auto-editor`)
+
+The-Machine ships a small stand-alone CLI wrapper (≤250 LOC) located at `tools/auto_editor_cli.py`.
+It leverages the open-source [Auto-Editor](https://github.com/WyattBlue/auto-editor) project to
+remove long silences and awkward pauses from your already-anonymised call WAV/MP3 files.
+
+### 1. Clone & install Auto-Editor once
+```bash
+# Inside project root
+git clone --depth 1 https://github.com/WyattBlue/auto-editor external_apps/auto_editor
+pip install -e external_apps/auto_editor  # inside your virtualenv
+```
+
+### 2. Run the wrapper manually
+```bash
+python tools/auto_editor_cli.py path/to/0123_call.wav \
+    --margin 0.2sec --silent-speed 99999 --video-speed 1 --verbose
+```
+This creates `0123_call_ae.wav` and a JSON report (placed in the nearest `run-*` folder if present).
+
+### 3. Integrate into PipelineOrchestrator
+Call the wrapper as a post-finalisation step:
+```python
+subprocess.run([
+    sys.executable,
+    "tools/auto_editor_cli.py",
+    call_wav,
+    "--report", manifest_tmp_json,
+])
+```
+The JSON report is designed to be merged into the main manifest.
+
+---
+
 **Built for context, privacy, and creativity.**
