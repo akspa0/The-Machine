@@ -39,15 +39,27 @@ class ShowSplitterExtension(ExtensionBase):
     # ------------------------------------------------------------------
     def _find_completed_show_mp3(self) -> Path | None:
         """Return path to the first non-bleeped MP3 inside finalized/show."""
-        candidates = [
-            p for p in self.show_dir.glob("*.mp3") if "bleep" not in p.name.lower()
-        ]
-        return candidates[0] if candidates else None
+        # 1) Prefer non-bleep MP3s in finalized/show
+        candidates = [p for p in self.show_dir.glob("*.mp3") if "bleep" not in p.name.lower()]
+
+        # 2) Fallback: check run_folder/show (where show_fixup writes show_fixed.mp3)
+        if not candidates:
+            alt_dir = self.run_folder / "show"
+            candidates = [p for p in alt_dir.glob("*.mp3") if "bleep" not in p.name.lower()]
+
+        # 3) Prefer a file named show_fixed.mp3 or completed-show.mp3 if present
+        preferred = None
+        for name in ("show_fixed.mp3", "completed-show.mp3"):
+            preferred = next((p for p in candidates if p.name == name), None)
+            if preferred:
+                break
+
+        return preferred or (candidates[0] if candidates else None)
 
     def _load_timeline(self) -> List[Dict[str, Any]]:
         timeline_path = self.run_folder / "show" / "show.json"
         if not timeline_path.exists():
-            self.log("Timeline JSON not found: %s", timeline_path)
+            self.log(f"Timeline JSON not found: {timeline_path}")
             return []
         with open(timeline_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -121,14 +133,14 @@ class ShowSplitterExtension(ExtensionBase):
 
         calls = self._collect_calls(timeline)
         if len(calls) <= 1:
-            self.log("Not enough calls (%s) to split.", len(calls))
+            self.log(f"Not enough calls ({len(calls)}) to split.")
             return
 
         # ----------------------------------------------------------------
         # Segment into bins
         # ----------------------------------------------------------------
         bins = segment_calls(calls, num_segments=self.num_segments)
-        self.log("Segmented into %s sub-shows.", len(bins))
+        self.log(f"Segmented into {len(bins)} sub-shows.")
 
         # Load full audio once
         full_audio = AudioSegment.from_mp3(show_mp3)
@@ -166,7 +178,7 @@ class ShowSplitterExtension(ExtensionBase):
                 if bleeped_wav.exists():
                     wav_to_mp3(bleeped_wav, bleeped_mp3)
             except Exception as exc:  # pragma: no cover – bleeper failure is non-fatal
-                self.log("Bleeper failed for part %s: %s", idx, exc)
+                self.log(f"Bleeper failed for part {idx}: {exc}")
 
             enhancements.append(
                 {
@@ -211,4 +223,18 @@ class ShowSplitterExtension(ExtensionBase):
 # ----------------------------------------------------------------------
 
 def run(run_folder: Path):  # noqa: D401 – external entry-point
-    ShowSplitterExtension(run_folder).execute() 
+    ShowSplitterExtension(run_folder).execute()
+
+
+# ----------------------------------------------------------------------
+#  Command-line usage: ``python -m extensions.show_splitter_extension …``
+# ----------------------------------------------------------------------
+
+if __name__ == '__main__':
+    import argparse
+    ap = argparse.ArgumentParser(description='Split a completed-show into themed sub-shows.')
+    ap.add_argument('run_folder', type=str, help='Path to outputs/run-YYYY… folder')
+    ap.add_argument('--segments', type=int, default=4, metavar='N', help='Number of sub-shows to create (default: 4)')
+    args = ap.parse_args()
+
+    ShowSplitterExtension(Path(args.run_folder), num_segments=args.segments).execute() 

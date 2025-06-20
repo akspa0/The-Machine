@@ -24,6 +24,16 @@ Tracks current work focus, recent changes, next steps, and active decisions for 
 • 💡 **Decision point:** (a) Hot-fix: always create `<call_id>` subfolder even for single-file mode (ensures uniform layout). (b) Mid-term: carve tuple-specific paths into an extension or alternate orchestrator to simplify the base pipeline.
 • 🚧 **Next Action:** Implement quick subfolder fix, then run regression. Consider splitting tuple logic later.
 
+## Updates 2025-06-20
+
+• 📝 **Show-notes refinement:** `tools/assemble_show_v2.py` now writes track-lists with the canonical format:
+  - Header: `# Show Title: …` and `# Part NN of MM   |  Duration: HH:MM:SS`.
+  - Call lines: `NN  HH:MM:SS  Call Title` (index, start-time, human title).
+  - Tone lines: `[TONE] HH:MM:SS – HH:MM:SS` (en-dash separator, no stray punctuation).
+  - Last tone omitted when `--no-tail-tone` is supplied.
+• 🎨 Helpers `fmt_call`, `fmt_tone`, `part_header` ensure consistency; extra stray parenthesis removed.
+• 📏 File still <750 LOC; audio concat logic untouched.
+
 ## Recent Changes
 
 - Extension registry & task manager stable.
@@ -43,6 +53,10 @@ Tracks current work focus, recent changes, next steps, and active decisions for 
 ## Next Steps (amendment)
 
 4. Implement optional **tempo restore stage** or CLI flag (`--fix-tempo 4.0`) before separation to handle slowed recordings.
+
+## Next Steps (addendum 2025-06-20)
+5. Add automated validation in CI to assert track-list files comply with the new pattern.
+6. Wire the show-notes generator (title + synopsis) into finalisation v2 once modularised.
 
 ## Active Decisions & Considerations
 

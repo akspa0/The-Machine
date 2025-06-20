@@ -164,6 +164,26 @@ def hms(ms: int) -> str:
     sec = s % 60
     return f"{h}:{m:02d}:{sec:02d}"
 
+# New pretty-printing helpers -------------------------------------------------
+
+def fmt_call(idx: int, start_ms: int, title: str) -> str:
+    """Return a call line like ``01  00:00:00  Some Title``"""
+    return f"{idx:02d}  {hms(start_ms)}  {title}"
+
+
+def fmt_tone(start_ms: int, end_ms: int) -> str:
+    """Return a tone line like ``[TONE] 00:42:15 – 00:42:18``"""
+    return f"[TONE] {hms(start_ms)} – {hms(end_ms)}"
+
+
+def part_header(title: str, part_idx: int, total_parts: int, duration_ms: int) -> List[str]:
+    """Return the two header lines for a part."""
+    return [
+        f"# Show Title: {title}",
+        f"# Part {part_idx:02d} of {total_parts:02d}   |  Duration: {hms(duration_ms)}",
+        "",
+    ]
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -234,7 +254,8 @@ def main():
                 start = cur_ms
                 end = cur_ms + dur
                 display_title = path.stem.replace("_", " ")
-                tl_entries.append(f"🎙️ {display_title} ({hms(start)} - {hms(end)})")
+                # use new call formatting
+                tl_entries.append(fmt_call(j + 1, start, display_title))
                 fp.write(f"file '{path.as_posix()}'\n")
                 cur_ms = end
                 if tone_path and not (args.no_tail_tone and j == len(part)-1):
@@ -242,7 +263,7 @@ def main():
                     tone_start_ms = cur_ms
                     fp.write(f"file '{tone_path.as_posix()}'\n")
                     cur_ms += tone_ms
-                    tl_entries.append(f"[TONE] {hms(tone_start_ms)} - {hms(cur_ms)})")
+                    tl_entries.append(fmt_tone(tone_start_ms, cur_ms))
         # filter chain
         filt = None
         if args.compress:
@@ -262,9 +283,12 @@ def main():
         # write tracklist
         part_track.parent.mkdir(parents=True, exist_ok=True)
         with part_track.open("w", encoding="utf-8") as ft:
-            ft.write(f"# Show Title: {title}\n\n")
+            # header lines
+            for line in part_header(title, idx, len(parts), cur_ms):
+                ft.write(line + "\n")
+            # entries
             for line in tl_entries:
-                ft.write(line+"\n")
+                ft.write(line + "\n")
         print(f"[OK] Part {idx}: {part_output.name}  title → {title}")
 
 if __name__ == "__main__":
