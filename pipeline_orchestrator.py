@@ -1378,6 +1378,16 @@ class PipelineOrchestrator:
         Always uses remixed calls built from normalized vocals.
         If call_tones is set, insert tones.wav between calls (not after the last call).
         """
+        # Delegate to registered finalise.F4 extension(s) when available
+        try:
+            from extensions.extension_base import list_extensions, run_extensions_for_stage  # type: ignore
+            if list_extensions("finalise.F4"):
+                self.log_event('INFO', 'show_stage_delegated_to_extensions', {})
+                run_extensions_for_stage(self.run_folder, "finalise.F4", call_tones=call_tones)
+                return
+        except Exception as _e:
+            self.log_event('WARNING', 'show_stage_extension_error', {'error': str(_e)})
+        
         import soundfile as sf
         import numpy as np
         from pathlib import Path

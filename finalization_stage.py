@@ -125,6 +125,7 @@ def run_finalization_stage(run_folder: Path, manifest: list):
                     'output_files': [str(remixed_wav)],
                     'original_title_for_id3': call_id
                 })
+    rename_map = {}
     for entry in call_entries:
         call_id = entry.get('call_id')
         wav_path = Path(entry.get('output_files')[0]) if entry.get('output_files') else None
@@ -173,8 +174,15 @@ def run_finalization_stage(run_folder: Path, manifest: list):
             transcript_dst = calls_dir / f'{sanitized_title}_transcript.txt'
             if transcript_src.exists():
                 shutil.copy2(transcript_src, transcript_dst)
+                # --- ALSO copy transcript into show/transcripts for easy access alongside the compiled show ---
+                show_transcripts_dir = show_dir / 'transcripts'
+                show_transcripts_dir.mkdir(parents=True, exist_ok=True)
+                show_transcript_dst = show_transcripts_dir / f'{sanitized_title}_transcript.txt'
+                shutil.copy2(transcript_src, show_transcript_dst)
             else:
                 print(f"[WARN] Master transcript not found for call {sanitized_title}: {transcript_src}")
+        if call_id:
+            rename_map[call_id] = sanitized_title
     # --- 2. Show ---
     show_wav = run_folder / 'show' / 'show.wav'
     show_json = run_folder / 'show' / 'show.json'
@@ -657,4 +665,13 @@ def run_finalization_stage(run_folder: Path, manifest: list):
         from extensions import extension_runner
         extension_runner.run_all(run_folder)
     except Exception as exc:
-        print(f"[EXT][WARN] Failed to execute extensions: {exc}") 
+        print(f"[EXT][WARN] Failed to execute extensions: {exc}")
+
+    # Write rename map for downstream tools (show_builder, resume)
+    if rename_map:
+        map_path = calls_dir / 'rename_map.json'
+        try:
+            with open(map_path, 'w', encoding='utf-8') as mf:
+                json.dump(rename_map, mf, indent=2)
+        except Exception as e:
+            print(f"[WARN] Failed to write rename_map.json: {e}") 
