@@ -38,6 +38,7 @@ Documents the system architecture, key technical decisions, design patterns, and
 - **All scripts/extensions import from this single utility; redundant scripts have been removed.**
 - **CLI entry points for chunking/summarization are now via `llm_utils.py`.**
 - **All extensions remain independently runnable and functional.**
+- **ShowAssemblerExtension Pattern (2025-06-21):** Final show creation (balancing calls, tone insertion, compression, per-part titling) is implemented in a dedicated extension (`stage = "finalise.F4"`).  It consumes workflow config and centralises all LLM calls through `LLMTaskManager`.
 
 ## Component Relationships
 

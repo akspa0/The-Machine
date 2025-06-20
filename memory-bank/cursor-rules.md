@@ -56,4 +56,8 @@
   2. Call entries: `NN  HH:MM:SS  <Call Title>` where `NN` is 01-based index and timestamp is start-time within the part.
   3. Tone entries: `[TONE] HH:MM:SS – HH:MM:SS` using an en-dash.
   4. Omit the final tone entry when `--no-tail-tone` flag is used.
-  This rule ensures downstream tooling can reliably parse and render show notes. 
+  This rule ensures downstream tooling can reliably parse and render show notes.
+
+- **LLM Centralisation Rule (2025-06-21):** All LLM prompts (titles, synopses, categories, summaries) must be executed via `extensions/llm_utils.LLMTaskManager`.  Direct `run_llm_task` imports in scripts are discouraged unless encapsulated inside the manager for batching/seed tracking.
+- **Show Assembler Extension Rule (2025-06-21):** The canonical show build process lives in `ShowAssemblerExtension` (`stage = "finalise.F4"`).  Legacy `pipeline_orchestrator.run_show_stage()` is deprecated once the extension reaches feature parity.
+- **Temp Directory Hygiene:** Any extension using `tempfile.mkdtemp()` must clean up or employ `TemporaryDirectory()` context managers to prevent run-folder bloat. 

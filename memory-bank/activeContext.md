@@ -81,3 +81,11 @@ CLI concepts under consideration (comma-delimited lists):
   --only-calls      0000-0003     ranges
 
 Nothing is wired yet— we're accumulating extensions first.  The registry & `LLMTaskManager` are already merged and will power this v2 when the orchestrator changes land. 
+
+## Updates 2025-06-21
+
+• 🚀 **Show Assembler Extension Kick-off:** Decision to retire legacy `run_show_stage()` and migrate the working logic of `tools/assemble_show_v2.py` into a dedicated `ShowAssemblerExtension` (`stage = "finalise.F4"`, `call_scope = "global"`).  Titles will be generated via `LLMTaskManager` to centralise API calls.
+• 📈 **LLMTaskManager Adoption:** All future LLM interactions (titles, synopses, categories) must funnel through the shared helper.  Batch execution is preferred but limited to one concurrent request given the single-threaded local server.
+• 🧹 **Temp Cleanup:** Assemble extension will wrap all tempo­rary artefacts in `TemporaryDirectory()` to avoid leftover folders.
+• ⚙️ **Workflow Configs:** New `workflows/show_assembler.json` will expose tunables (target_len, compression, tone gain).  Orchestrator will load & hand to extension.
+• 🏗️ **Orchestrator Slim-Down:** Existing remix and finalisation methods marked deprecated; calls will be routed through extensions once parity is confirmed. 

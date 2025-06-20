@@ -25,6 +25,9 @@ Tracks what works, what's next, and current status for The-Machine.
 • Slow-tempo (≤0.5×) audio yields zero diarization/ASR output. Need pre-processing option to restore tempo before separation.
 • Single-file `-out-` inputs skip normalization & ASR due to missing `<call_id>` subfolder in `separated/`. Hot-fix pending.
 
+### 2025-06-21 Addendum
+• Begin migrating remix & show logic into extensions (`RemixExtension`, `ShowAssemblerExtension`).  Remove duplicated paths from orchestrator once feature parity is validated.
+
 ## Current Status
 
 System healthy after separation patch; ready for modular refactor. 
