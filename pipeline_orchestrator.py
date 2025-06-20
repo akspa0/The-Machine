@@ -54,7 +54,8 @@ class Job:
         self.job_type = job_type  # 'rename' or 'separate'
 
 class PipelineOrchestrator:
-    def __init__(self, run_folder: Path, asr_engine: str, llm_config_path: str = None):
+    def __init__(self, run_folder: Path, asr_engine: str, llm_config_path: str = None,
+                 separate_left: bool = False, max_speakers: int = 2):
         self.jobs: List[Job] = []
         self.log: List[Dict[str, Any]] = []
         self.manifest: List[Dict[str, Any]] = []
@@ -65,6 +66,9 @@ class PipelineOrchestrator:
         self.asr_engine = asr_engine
         self.llm_config_path = llm_config_path
         self.global_llm_seed = None
+        # --- performance-tuning flags ---
+        self.separate_left = separate_left          # run vocal separation on left channel?
+        self.max_speakers = max(1, min(4, max_speakers))  # diarization speaker cap
     def add_job(self, job: Job):
         self.jobs.append(job)
     def log_event(self, level, event, details=None):
@@ -263,7 +267,7 @@ class PipelineOrchestrator:
             } for job in separation_jobs], f, indent=2)
         self.log_event('INFO', 'audio_separation_complete', {'manifest_path': str(manifest_path)})
 
-    def run_diarization_stage(self, hf_token=None, min_speakers=None, max_speakers=4):
+    def run_diarization_stage(self, hf_token=None, min_speakers=None, max_speakers=None):
         """
         Run speaker diarization for all vocal files in separated/<call id>/.
         Handles both traditional *-vocals.wav files and complete *-conversation.wav files.
@@ -274,6 +278,8 @@ class PipelineOrchestrator:
         separated_dir = self.run_folder / 'separated'
         diarized_dir = self.run_folder / 'diarized'
         diarized_dir.mkdir(exist_ok=True)
+        if max_speakers is None:
+            max_speakers = self.max_speakers
         self.log_event('INFO', 'diarization_start', {'max_speakers': max_speakers})
         
         # Find all files to diarize (vocals from separation + complete conversations)
@@ -914,14 +920,12 @@ class PipelineOrchestrator:
                     transcript_text = f.read()
             # --- LLM chunking for long transcripts ---
             token_count = estimate_tokens(transcript_text)
-            if token_count > 2048:
-                self.log_event('INFO', 'llm_chunking_applied', {
+            if token_count > 3000:
+                self.log_event('INFO', 'llm_summarize_long_transcript', {
                     'call_id': call_id,
-                    'original_token_count': token_count,
-                    'chunk_size': 2000
+                    'original_token_count': token_count
                 })
-                chunks = llm_utils.split_into_chunks_advanced(transcript_text, max_tokens=2000)
-                transcript_text = '\n\n'.join(chunks)
+                transcript_text = llm_utils.summarize_if_long(transcript_text, llm_config)
             call_llm_dir = llm_dir / call_id
             call_llm_dir.mkdir(parents=True, exist_ok=True)
             if mode == 'call':
@@ -991,7 +995,7 @@ class PipelineOrchestrator:
                 for speaker_id, speaker_text in per_speaker.items():
                     speaker_outputs[speaker_id] = {}
                     token_count = estimate_tokens(speaker_text)
-                    if token_count > safe_chunk:
+                    if token_count > safe_chunk*1.5:
                         # Chunking logic (as before)
                         words = speaker_text.split()
                         chunk_size = safe_chunk * 4
@@ -1608,7 +1612,7 @@ class PipelineOrchestrator:
             ('separation', lambda: (self.add_separation_jobs(), self.run_audio_separation_stage())),
             ('normalization', self.run_normalization_stage),
             ('true_peak_normalization', self.run_true_peak_normalization_stage),
-            ('diarization', self.run_diarization_stage),
+            ('diarization', lambda: self.run_diarization_stage(max_speakers=self.max_speakers)),
             ('segmentation', self.run_speaker_segmentation_stage),
             ('resampling', self.run_resample_segments_stage),
             ('transcription', lambda: self.run_transcription_stage(asr_engine=self.asr_engine)),
@@ -2033,6 +2037,13 @@ if __name__ == '__main__':
         "\n\nNote: By default, out- files are only used for CLAP segmentation/annotation. Use --process-out-files to process them as single-file inputs (not recommended for main workflow)."
     )
 
+    # --- Performance tuning flags ---
+    parser.add_argument('--separate-left', action='store_true',
+                        help='Apply full vocal separation to the left (recv_out) channel as well. If omitted, the left channel is copied as vocals-only for faster processing.')
+    parser.add_argument('--max-speakers', type=int, default=2, choices=range(1, 5),
+                        metavar='N',
+                        help='Maximum number of speakers per channel for diarization (1-4, default: 2)')
+
     args = parser.parse_args()
 
     # --- URL download logic ---
@@ -2215,7 +2226,8 @@ if __name__ == '__main__':
             # Continue with normal run
 
         # Create orchestrator for existing folder - DO NOT create or reconstruct jobs
-        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
+        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config,
+                                            separate_left=args.separate_left, max_speakers=args.max_speakers)
         # Load manifest if it exists
         manifest_path = run_folder / 'manifest.json'
         if manifest_path.exists():
@@ -2267,7 +2279,8 @@ if __name__ == '__main__':
             run_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
             run_folder = Path('outputs') / f'run-{run_ts}'
         print(f"🆕 Starting fresh run: {run_folder}")
-        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config)
+        orchestrator = PipelineOrchestrator(run_folder, args.asr_engine, args.llm_config,
+                                            separate_left=args.separate_left, max_speakers=args.max_speakers)
         jobs = create_jobs_from_input(input_dir)
         for job in jobs:
             orchestrator.add_job(job)

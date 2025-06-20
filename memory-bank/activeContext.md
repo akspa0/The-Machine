@@ -15,6 +15,14 @@ Tracks current work focus, recent changes, next steps, and active decisions for 
 • 🛠️ **Dependency hot-fix:** Added `numpy<=2.1.*` pin in `requirements.txt` because NeMo → Numba chain is incompatible with NumPy 2.2 +.  Also added early guard in `transcription.py` that aborts with a clear message when a higher NumPy version is detected.
 • 🔄 **ASR fallback path:** `transcription.py` now auto-falls back to Whisper when Parakeet import fails, preventing pipeline aborts.
 • 🐢 **Slow-tempo audio caveat:** A recent run used 0.25× speed audio; ASR produced zero transcripts. Decision pending: either pre-restore tempo (sox tempo 4.0) or accept transcript-less flow.
+• 🎨 **Collage auto-build:** `MultiSpeakerCollageExtension` now auto-runs `PhraseTimestampExtension` if `phrase_ts/` is absent and aggregates phrases across runs correctly.
+
+## Updates 2025-06-17
+
+• 🐞 **Pipeline blockage for single-file (out) inputs:** Discovered that `add_separation_jobs()` drops stems directly in `separated/` when handling conversation `-out-` files. Downstream stages (normalization → true-peak → diarization → ASR) expect the canonical layout `separated/<call_id>/…`, so they found no inputs and skipped work → zero transcripts and soundbites.
+• 🔍 **Root cause:** Directory contract mismatch introduced during tuple-prefix refactor.
+• 💡 **Decision point:** (a) Hot-fix: always create `<call_id>` subfolder even for single-file mode (ensures uniform layout). (b) Mid-term: carve tuple-specific paths into an extension or alternate orchestrator to simplify the base pipeline.
+• 🚧 **Next Action:** Implement quick subfolder fix, then run regression. Consider splitting tuple logic later.
 
 ## Recent Changes
 

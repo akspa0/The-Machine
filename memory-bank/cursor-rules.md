@@ -45,4 +45,8 @@
 • `--skip-calls` / `--only-calls` accept indexes or ranges (e.g., 0001,0003-0005).
 • Pipeline must respect privacy rule: skip-list evaluation must happen before any logging.
 
-- **NumPy Pin Rule (2025-06-16):** Until Numba ≥0.61 confirmed compatible, keep `numpy<=2.1.*`. Any environment setup must respect this pin; `transcription.py` contains a guard to enforce. 
+- **NumPy Pin Rule (2025-06-16):** Until Numba ≥0.61 confirmed compatible, keep `numpy<=2.1.*`. Any environment setup must respect this pin; `transcription.py` contains a guard to enforce.
+
+- **Extension Prerequisite Rule (2025-06-16):** If an extension depends on generated folders (e.g., `phrase_ts/`), it should attempt to auto-run the prerequisite extension when the folder is missing, and fail gracefully with clear logging.
+
+- **Separated Folder Contract (2025-06-17):** Regardless of input mode, separation stage must output stems inside `separated/<call_id>/`. Downstream logic (normalization, true-peak, diarization, etc.) relies on this path. Any code introducing new modalities must update the contract or the consumers before merge. 

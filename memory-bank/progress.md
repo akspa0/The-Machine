@@ -13,6 +13,7 @@ Tracks what works, what's next, and current status for The-Machine.
 
 ### 2025-06-16 Addendum
 • Dependency pin (`numpy<=2.1.*`) + runtime guard now ensure Parakeet/NeMo import path works; pipeline no longer crashes on ImportError.
+• Multi-speaker collage extension functional; auto-builds phrase_ts on demand and produces montage WAV/TXT.
 
 ## What's Next
 
@@ -22,6 +23,7 @@ Tracks what works, what's next, and current status for The-Machine.
 
 ### Known Issues
 • Slow-tempo (≤0.5×) audio yields zero diarization/ASR output. Need pre-processing option to restore tempo before separation.
+• Single-file `-out-` inputs skip normalization & ASR due to missing `<call_id>` subfolder in `separated/`. Hot-fix pending.
 
 ## Current Status
 

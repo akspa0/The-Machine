@@ -311,4 +311,40 @@ class LLMTaskManager:
         for task in tasks:
             prompt = task.pop("prompt")
             mgr.add(prompt, **task)
-        return mgr.run_all() 
+        return mgr.run_all()
+
+# ---------------------------------------------------------------------------
+#  Quick summarisation guard for oversize transcripts
+# ---------------------------------------------------------------------------
+
+def summarize_if_long(text: str, llm_config: dict, *, model: str = "gpt-3.5-turbo",
+                      max_tokens: int = 3500, target_tokens: int = 1800,
+                      prompt_template: str | None = None) -> str:
+    """Return *text* or a shorter LLM-generated summary when it exceeds *target_tokens*.
+
+    Uses :func:`recursive_summarize` with sensible defaults.  Relies on the
+    existing LLM backend so no new dependencies are introduced.
+    """
+    token_count = len(tokenize_text(text, model=model)[0])
+    if token_count <= target_tokens:
+        return text
+
+    if prompt_template is None:
+        prompt_template = (
+            "Summarize the following transcript preserving key points, speaker intent, "
+            "and humour. Strictly exclude any personally-identifiable information."
+        )
+
+    chunks = recursive_summarize(
+        text,
+        default_llm_summarize_fn,
+        max_chunks=8,
+        chunk_size=max_tokens,
+        overlap=0,
+        context_seed=None,
+        model=model,
+        llm_config=llm_config,
+        prompt_template=prompt_template,
+        verbose=False,
+    )
+    return "\n\n".join(chunks) 

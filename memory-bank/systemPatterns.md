@@ -31,6 +31,8 @@ Documents the system architecture, key technical decisions, design patterns, and
 - **Privacy-First:** No PII is ever logged or output; privacy is enforced at every stage.
 - **API-Driven:** All file and job transfers to external tools are done via robust APIs, never direct file system access.
 - **Database Integration (Planned):** All jobs, files, and metadata will be referenceable and queryable via a database registry.
+- **Lazy Prerequisite Invocation:** Extensions may detect missing prerequisite output (e.g., `phrase_ts/`) and invoke the responsible helper extension automatically, logging any failure but continuing when possible.
+- **Canonical Output Tree Contract (2025-06-17):** All downstream stages assume audio stems live under `separated/<call_id>/`. Separation stage MUST honor this regardless of input modality (tuple, conversation, single-file). Any future mode changes must preserve or formally version this contract before merge.
 - **New:** Audio file validation is performed by duration (≥10s) before separation, with pre-processing and logging of file validity. Metadata from single-file inputs is transferred to output soundbites during finalization.
 - **All LLM chunking, tokenization, and summarization logic is unified in `extensions/llm_utils.py`.**
 - **All scripts/extensions import from this single utility; redundant scripts have been removed.**
